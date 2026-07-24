@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CCE Settings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      display: flex;
+      height: 100vh;
+      font-family: var(--vscode-font-family);
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+    }
+
+    /* ── sidebar tabs ── */
+
+    .tab-sidebar {
+      width: 160px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--vscode-sideBarSectionHeader-border);
+      padding: 16px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .tab-btn {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-family: var(--vscode-font-family);
+      color: var(--vscode-foreground);
+      background: none;
+      border: none;
+      cursor: pointer;
+      text-align: left;
+      border-radius: 0;
+      opacity: 0.8;
+    }
+    .tab-btn:hover {
+      background: var(--vscode-toolbar-hoverBackground);
+      opacity: 1;
+    }
+    .tab-btn.active {
+      background: var(--vscode-toolbar-activeBackground);
+      opacity: 1;
+      font-weight: 600;
+    }
+    .tab-btn svg {
+      flex-shrink: 0;
+    }
+
+    /* ── content area ── */
+
+    .tab-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+    }
+    .tab-content h2 {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 24px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
+    }
+
+    /* ── models tab ── */
+
+    .model-list {
+      margin-bottom: 32px;
+    }
+    .model-card {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      border-radius: 6px;
+      background: var(--vscode-textBlockQuote-background);
+    }
+    .model-card .info {
+      flex: 1;
+      min-width: 0;
+    }
+    .model-card .name {
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .model-card .detail {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .model-card .card-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+    .status-dot.running {
+      background: #4caf50;
+      box-shadow: 0 0 4px rgba(76, 175, 80, 0.5);
+    }
+    .status-dot.stopped {
+      background: #9e9e9e;
+    }
+
+    .type-badge {
+      font-size: 10px;
+      font-weight: 400;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-badge-background);
+      padding: 1px 6px;
+      border-radius: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
+    .start-btn, .stop-btn {
+      background: none;
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
+      cursor: pointer;
+      color: var(--vscode-foreground);
+      font-size: 11px;
+      padding: 2px 6px;
+      line-height: 1;
+      margin-right: 4px;
+    }
+    .start-btn:hover { background: var(--vscode-button-hoverBackground); color: var(--vscode-button-foreground); }
+    .stop-btn:hover { background: var(--vscode-errorForeground); color: white; }
+
+    .card-actions button {
+      background: none;
+      border: none;
+      color: var(--vscode-foreground);
+      opacity: 0.5;
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 4px;
+    }
+    .card-actions button:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
+    .empty-hint {
+      font-size: 12px;
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+    }
+
+    h3 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    .form-group { margin-bottom: 12px; }
+    .form-group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      color: var(--vscode-descriptionForeground);
+    }
+    .form-group input,
+    .form-group select,
+    .form-group textarea {
+      width: 100%;
+      padding: 6px 10px;
+      font-size: 13px;
+      font-family: var(--vscode-font-family);
+      border: 1px solid var(--vscode-input-border);
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border-radius: 4px;
+    }
+    .form-group input:focus,
+    .form-group select:focus,
+    .form-group textarea:focus {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    .form-group input::placeholder,
+    .form-group textarea::placeholder {
+      color: var(--vscode-input-placeholderForeground);
+    }
+    .form-group textarea {
+      resize: vertical;
+      min-height: 80px;
+    }
+    .form-row { display: flex; gap: 12px; }
+    .form-row .form-group { flex: 1; }
+
+    .api-key-hint {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      margin-top: 2px;
+    }
+
+    .actions { display: flex; gap: 8px; margin-top: 16px; }
+    button {
+      padding: 6px 14px;
+      font-size: 13px;
+      font-family: var(--vscode-font-family);
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+    .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
+    .btn-secondary {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    .btn-secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+
+    .header-row { display: flex; gap: 6px; margin-bottom: 4px; align-items: center; }
+    .header-row input { flex: 1; min-width: 0; }
+    .header-row button {
+      background: none; border: none; color: var(--vscode-foreground);
+      opacity: 0.5; cursor: pointer; padding: 4px; font-size: 14px; line-height: 1;
+    }
+    .header-row button:hover { opacity: 1; }
+
+    .tool-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
+    }
+    .tool-item .tool-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .tool-item .tool-name {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+    .tool-item .tool-desc {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+    }
+    .toggle {
+      position: relative;
+      display: inline-block;
+      width: 36px;
+      height: 20px;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .toggle .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 10px;
+      transition: background 0.15s;
+    }
+    .toggle .slider::before {
+      content: '';
+      position: absolute;
+      height: 14px;
+      width: 14px;
+      left: 2px;
+      bottom: 2px;
+      background: var(--vscode-foreground);
+      border-radius: 50%;
+      transition: transform 0.15s;
+    }
+    .toggle input:checked + .slider {
+      background: var(--vscode-button-background);
+      border-color: var(--vscode-button-background);
+    }
+    .toggle input:checked + .slider::before {
+      transform: translateX(16px);
+      background: var(--vscode-button-foreground);
+    }
+  </style>
+</head>
+<body>
+  <!-- ── sidebar tabs ── -->
+  <nav class="tab-sidebar">
+    <button class="tab-btn active" data-tab="models">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1.75 2.5a.75.75 0 0 1 .75-.75h11a.75.75 0 0 1 .75.75v11a.75.75 0 0 1-.75.75h-11a.75.75 0 0 1-.75-.75v-11zm1.5 11.25V3.25h9.5v10.5h-9.5z" clip-rule="evenodd"/><path d="M4.75 5.5a.75.75 0 0 1 .75-.75h5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1-.75-.75zm0 2.5a.75.75 0 0 1 .75-.75h5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1-.75-.75zm0 2.5a.75.75 0 0 1 .75-.75h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1-.75-.75z"/></svg>
+      Models
+    </button>
+    <button class="tab-btn" data-tab="context">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z" clip-rule="evenodd"/></svg>
+      Context
+    </button>
+    <button class="tab-btn" data-tab="tools">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M14.773 3.573a.75.75 0 0 1-.328 1.015L11 6.459l-.573 2.074 2.074-.573 1.871-3.445a.75.75 0 0 1 1.015-.328.75.75 0 0 1 .328 1.015L14.1 8.068 11.11 8.9a.75.75 0 0 1-.786.164l-1.824-.82V14h-3V8.244l-1.824-.82a.75.75 0 0 1-.786-.164l-2.99-2.99A.75.75 0 0 1 .5 1.5h2.244l.82-1.824a.75.75 0 0 1 .786-.164L8 1.1l3.653-1.586a.75.75 0 0 1 1.015.328.75.75 0 0 1-.328 1.015L8.895 2.459l-.573 2.074 2.074-.573 3.445-1.871a.75.75 0 0 1 .932.484zM2.92 3l2.07 2.07 2.277-.63L5.17 6.835a.75.75 0 0 1-.164.786l-2.99 2.99a.75.75 0 0 0-.232.526.75.75 0 0 0 .142.448l.8-1.773a.75.75 0 0 1 .95-.402l1.033.377-.377 1.033a.75.75 0 0 1-.402.95L2.16 13.07A.75.75 0 0 0 2.92 12h.004L5.77 9.155l2.276-.63L7.98 6.47a.75.75 0 0 1 .164-.786L11 2.92a.72.72 0 0 0 .04-.04h.003L10.16 2.08a.75.75 0 0 1-.95-.402l-.377-1.033 1.033.377a.75.75 0 0 1 .402.95L9.47 2.92z" clip-rule="evenodd"/></svg>
+      Tools
+    </button>
+    <button class="tab-btn" data-tab="mcp">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1.5 2.75a.25.25 0 0 1 .25-.25h3a.25.25 0 0 1 .25.25v3a.25.25 0 0 1-.25.25h-3a.25.25 0 0 1-.25-.25v-3zm1.5 3V3.25h1.5V5.5H3zm7.75-3a.25.25 0 0 1 .25-.25h3a.25.25 0 0 1 .25.25v3a.25.25 0 0 1-.25.25h-3a.25.25 0 0 1-.25-.25v-3zm1.5 3V3.25h1.5V5.5h-1.5zm-6.5 4.5a.25.25 0 0 1 .25-.25h3a.25.25 0 0 1 .25.25v3a.25.25 0 0 1-.25.25h-3a.25.25 0 0 1-.25-.25v-3zm1.5 3v-1.5h1.5v1.5h-1.5zm5.75-3a.25.25 0 0 1 .25-.25h3a.25.25 0 0 1 .25.25v3a.25.25 0 0 1-.25.25h-3a.25.25 0 0 1-.25-.25v-3zm1.5 3v-1.5h1.5v1.5h-1.5z" clip-rule="evenodd"/></svg>
+      MCP
+    </button>
+  </nav>
+
+  <!-- ── Models tab ── -->
+  <section class="tab-content active" id="tab-models">
+    <h2>Models</h2>
+
+    <div class="model-list" id="modelList">
+      <div class="empty-hint">No models configured yet.</div>
+    </div>
+
+    <h3 id="formTitle">Add Model</h3>
+    <div class="form-group">
+      <label for="displayName">Display Name</label>
+      <input type="text" id="displayName" placeholder="e.g. My GPT-4o" />
+    </div>
+    <div class="form-group">
+      <label for="provider">Provider</label>
+      <select id="provider">
+        <option value="openai">OpenAI / OpenAI-compatible</option>
+        <option value="anthropic">Anthropic</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="modelId">Model ID</label>
+        <input type="text" id="modelId" placeholder="e.g. gpt-4o" />
+      </div>
+      <div class="form-group">
+        <label for="endpoint">API Endpoint</label>
+        <input type="text" id="endpoint" placeholder="e.g. https://api.openai.com/v1" />
+      </div>
+    </div>
+    <div class="form-group">
+      <label for="apiKey">API Key</label>
+      <input type="password" id="apiKey" placeholder="sk-..." />
+      <div class="api-key-hint" id="apiKeyHint" style="display:none">Leave empty to keep the existing key.</div>
+      <div class="api-key-hint" id="apiKeyOptional">Optional — leave empty for local models.</div>
+    </div>
+    <div class="actions">
+      <button class="btn-primary" id="saveBtn">Add Model</button>
+      <button class="btn-secondary" id="cancelBtn" style="display:none">Cancel</button>
+    </div>
+  </section>
+
+  <!-- ── Context tab ── -->
+  <section class="tab-content" id="tab-context">
+    <h2>Context</h2>
+
+    <div class="form-group">
+      <label for="systemPrompt">System Prompt</label>
+      <textarea id="systemPrompt" rows="8" placeholder="You are a helpful coding assistant..."></textarea>
+      <div class="api-key-hint">This prompt is sent as a system message at the start of every conversation.</div>
+    </div>
+
+    <h3>Auto-inject</h3>
+    <div id="contextFlags"></div>
+
+    <div class="tool-item">
+      <div class="tool-info">
+        <div class="tool-name">AGENTS.md / Project Instructions</div>
+        <div class="tool-desc">Include a project instructions file (AGENTS.md) as context.</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="useAgentsMdToggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="form-group" style="margin-top:8px">
+      <input type="text" id="agentsMdPath" placeholder="AGENTS.md">
+    </div>
+
+    <div class="actions">
+      <button class="btn-primary" id="savePromptBtn">Save</button>
+      <span id="promptSaved" style="display:none; font-size:12px; color: var(--vscode-descriptionForeground); padding:6px 0">Saved.</span>
+    </div>
+  </section>
+
+  <!-- ── Tools tab ── -->
+  <section class="tab-content" id="tab-tools">
+    <h2>Tools</h2>
+    <div class="api-key-hint" style="margin-bottom:20px">
+      Enable or disable tools the model can use to interact with your workspace.
+    </div>
+    <div id="toolToggles"></div>
+  </section>
+
+  <!-- ── MCP tab ── -->
+  <section class="tab-content" id="tab-mcp">
+    <h2>MCP Servers</h2>
+    <div class="api-key-hint" style="margin-bottom:20px">
+      Configure Model Context Protocol servers. These provide additional tools and resources to the model.
+    </div>
+
+    <div id="mcpList"></div>
+
+    <h3 id="mcpFormTitle">Add Server</h3>
+    <div class="form-group">
+      <label for="mcpType">Type</label>
+      <select id="mcpType">
+        <option value="http">HTTP</option>
+        <option value="stdio">Local Process (stdio)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="mcpName">Name</label>
+      <input type="text" id="mcpName" placeholder="e.g. Chrome DevTools" />
+    </div>
+    <div id="mcpUrlGroup" class="form-group">
+      <label for="mcpUrl">URL</label>
+      <input type="text" id="mcpUrl" placeholder="https://mcp.example.com" />
+    </div>
+    <div id="mcpHeadersGroup" class="form-group">
+      <label>Headers <span class="api-key-hint">(optional)</span></label>
+      <div id="mcpHeaders"></div>
+      <button class="btn-secondary" id="addHeaderBtn" style="margin-top:6px;font-size:11px">+ Add Header</button>
+    </div>
+    <div id="mcpCmdGroup" class="form-group" style="display:none">
+      <label for="mcpCommand">Command</label>
+      <input type="text" id="mcpCommand" placeholder="e.g. npx" />
+    </div>
+    <div id="mcpArgsGroup" class="form-group" style="display:none">
+      <label for="mcpArgs">Arguments <span class="api-key-hint">(space-separated, optional)</span></label>
+      <input type="text" id="mcpArgs" placeholder="-y chrome-devtools-mcp@latest" />
+    </div>
+    <div class="actions">
+      <button class="btn-primary" id="mcpSaveBtn">Add Server</button>
+      <button class="btn-secondary" id="mcpCancelBtn" style="display:none">Cancel</button>
+    </div>
+
+
+  <script>
+    var vscode = acquireVsCodeApi();
+
+    // ── tab switching ──
+    var tabBtns = document.querySelectorAll('.tab-btn');
+    var tabContents = document.querySelectorAll('.tab-content');
+
+    tabBtns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var tab = btn.dataset.tab;
+        tabBtns.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        tabContents.forEach(function (c) { c.classList.remove('active'); });
+        document.getElementById('tab-' + tab).classList.add('active');
+      });
+    });
+
+    // ── Models tab ──
+    var modelListEl = document.getElementById('modelList');
+    var formTitle = document.getElementById('formTitle');
+    var displayNameEl = document.getElementById('displayName');
+    var providerEl = document.getElementById('provider');
+    var modelIdEl = document.getElementById('modelId');
+    var endpointEl = document.getElementById('endpoint');
+    var apiKeyEl = document.getElementById('apiKey');
+    var apiKeyHint = document.getElementById('apiKeyHint');
+    var apiKeyOptional = document.getElementById('apiKeyOptional');
+    var saveBtn = document.getElementById('saveBtn');
+    var cancelBtn = document.getElementById('cancelBtn');
+
+    var editingId = null;
+
+    function setEditingMode(id, model) {
+      editingId = id;
+      formTitle.textContent = 'Edit Model';
+      saveBtn.textContent = 'Save';
+      cancelBtn.style.display = '';
+      apiKeyHint.style.display = '';
+      apiKeyEl.placeholder = '(unchanged)';
+
+      displayNameEl.value = model.name;
+      providerEl.value = model.provider;
+      modelIdEl.value = model.modelId;
+      endpointEl.value = model.endpoint || '';
+      apiKeyEl.value = '';
+      displayNameEl.focus();
+    }
+
+    function setAddingMode() {
+      editingId = null;
+      formTitle.textContent = 'Add Model';
+      saveBtn.textContent = 'Add Model';
+      cancelBtn.style.display = 'none';
+      apiKeyHint.style.display = 'none';
+      apiKeyEl.placeholder = 'sk-...';
+
+      displayNameEl.value = '';
+      providerEl.value = 'openai';
+      modelIdEl.value = '';
+      endpointEl.value = '';
+      apiKeyEl.value = '';
+    }
+
+    function renderModelList(models) {
+      if (!models || models.length === 0) {
+        modelListEl.innerHTML = '<div class="empty-hint">No models configured yet.</div>';
+        return;
+      }
+      modelListEl.innerHTML = models.map(function (m) {
+        return '<div class="model-card">' +
+          '<div class="info">' +
+            '<div class="name">' + esc(m.name) + '</div>' +
+            '<div class="detail">' + esc(m.provider) + ' \u2014 ' + esc(m.modelId) + ' \u2014 ' + esc(m.endpoint) + '</div>' +
+          '</div>' +
+          '<div class="card-actions">' +
+            '<button class="edit-btn" data-id="' + esc(m.id) + '" title="Edit">' +
+              '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25a1.75 1.75 0 0 1 .445-.758l8.61-8.61zm1.414 1.06a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354l-1.086-1.086zM11.189 6.25L9.75 4.81l-6.286 6.287a.25.25 0 0 0-.064.108l-.558 1.953 1.953-.558a.25.25 0 0 0 .108-.064l6.286-6.286z" clip-rule="evenodd"/></svg>' +
+            '</button>' +
+            '<button class="del-btn" data-id="' + esc(m.id) + '" title="Delete">' +
+              '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M6.5 1.75a.25.25 0 0 1 .25-.25h2.5a.25.25 0 0 1 .25.25V3h-3V1.75zM4.75 3a.75.75 0 0 0-.74.873l1 10.5A.75.75 0 0 0 5.75 15h4.5a.75.75 0 0 0 .74-.627l1-10.5A.75.75 0 0 0 11.25 3H4.75zM3.22 3.22a.75.75 0 0 1 .53-.22h8.5a.75.75 0 0 1 0 1.5h-.53l-.98 10.27a2.25 2.25 0 0 1-2.22 1.98h-2.04a2.25 2.25 0 0 1-2.22-1.98l-.98-10.27h-.53a.75.75 0 0 1-.75-.75.75.75 0 0 1 .22-.53zM6 5.75a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-1.5 0v-6.5A.75.75 0 0 1 6 5.75zm4 0a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-1.5 0v-6.5A.75.75 0 0 1 10 5.75z" clip-rule="evenodd"/></svg>' +
+            '</button>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      modelListEl.querySelectorAll('.edit-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var id = btn.dataset.id;
+          var model = models.find(function (m) { return m.id === id; });
+          if (model) setEditingMode(id, model);
+        });
+      });
+
+      modelListEl.querySelectorAll('.del-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var id = btn.dataset.id;
+          if (editingId === id) setAddingMode();
+          vscode.postMessage({ type: 'deleteModel', configId: id });
+        });
+      });
+    }
+
+    function esc(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+
+    saveBtn.addEventListener('click', function () {
+      var name = displayNameEl.value.trim();
+      var mdlId = modelIdEl.value.trim();
+      if (!name || !mdlId) return;
+
+      var config = {
+        name: name,
+        provider: providerEl.value,
+        modelId: mdlId,
+        endpoint: endpointEl.value.trim(),
+        apiKey: apiKeyEl.value.trim()
+      };
+
+      if (editingId) {
+        vscode.postMessage({ type: 'updateModel', configId: editingId, config: config });
+      } else {
+        vscode.postMessage({ type: 'addModel', config: config });
+      }
+      setAddingMode();
+    });
+
+    // ── Context tab ──
+    var systemPromptEl = document.getElementById('systemPrompt');
+    var savePromptBtn = document.getElementById('savePromptBtn');
+    var promptSavedEl = document.getElementById('promptSaved');
+
+    savePromptBtn.addEventListener('click', function () {
+      vscode.postMessage({ type: 'saveSystemPrompt', prompt: systemPromptEl.value });
+      promptSavedEl.style.display = '';
+      setTimeout(function () { promptSavedEl.style.display = 'none'; }, 2000);
+    });
+
+    // ── Context flags ──
+    var contextFlagsEl = document.getElementById('contextFlags');
+    var useAgentsMdToggle = document.getElementById('useAgentsMdToggle');
+    var agentsMdPathEl = document.getElementById('agentsMdPath');
+    var CTX_FLAGS = [
+      { flag: 'includeDate', label: 'Current date & time', desc: 'Let the model know the current date and time.' },
+      { flag: 'includeOS', label: 'Operating system', desc: 'Tell the model which OS and platform you are on.' },
+      { flag: 'includeRegion', label: 'Regional settings', desc: 'Tell the model your locale, language, and timezone.' }
+    ];
+
+    function renderContextFlags(flags) {
+      contextFlagsEl.innerHTML = CTX_FLAGS.map(function(f) {
+        var checked = flags[f.flag] !== false ? ' checked' : '';
+        return '<div class="tool-item">' +
+          '<div class="tool-info">' +
+            '<div class="tool-name">' + esc(f.label) + '</div>' +
+            '<div class="tool-desc">' + esc(f.desc) + '</div>' +
+          '</div>' +
+          '<label class="toggle">' +
+            '<input type="checkbox" class="ctx-flag" data-flag="' + esc(f.flag) + '"' + checked + '>' +
+            '<span class="slider"></span>' +
+          '</label>' +
+        '</div>';
+      }).join('');
+
+      contextFlagsEl.querySelectorAll('.ctx-flag').forEach(function(cb) {
+        cb.addEventListener('change', function() {
+          vscode.postMessage({ type: 'setContextFlag', flag: cb.dataset.flag, enabled: cb.checked });
+        });
+      });
+    }
+
+    useAgentsMdToggle.addEventListener('change', function () {
+      vscode.postMessage({ type: 'setUseAgentsMd', enabled: useAgentsMdToggle.checked });
+    });
+    agentsMdPathEl.addEventListener('change', function () {
+      vscode.postMessage({ type: 'setAgentsMdPath', path: agentsMdPathEl.value.trim() });
+    });
+
+    // ── Tools tab ──
+    var toolTogglesEl = document.getElementById('toolToggles');
+
+    var TOOL_DEFS = [
+      { name: 'read_file', label: 'Read File', desc: 'Read contents of workspace files.' },
+      { name: 'get_selection', label: 'Get Selection', desc: 'Get the current editor selection and cursor position.' },
+      { name: 'search_code', label: 'Search Code', desc: 'Search workspace with ripgrep for patterns.' },
+      { name: 'list_files', label: 'List Files', desc: 'List files and directories in the workspace.' },
+      { name: 'get_diagnostics', label: 'Get Diagnostics', desc: 'Read VSCode errors, warnings, and hints.' },
+      { name: 'write_file', label: 'Write File', desc: 'Create a new file or completely overwrite an existing file.' },
+      { name: 'edit_file', label: 'Edit File', desc: 'Make targeted edits by finding exact text and replacing it.' },
+      { name: 'delete_files', label: 'Delete File', desc: 'Delete a file or directory from the workspace. Use with caution.' },
+      { name: 'run_command', label: 'Run Command', desc: 'Execute shell commands. Use with caution.' },
+      { name: 'agent', label: 'Sub-Agents', desc: 'Spawn parallel sub-agents to work on multiple independent tasks simultaneously.' }
+    ];
+
+    function renderToolToggles(toolSettings) {
+      toolTogglesEl.innerHTML = TOOL_DEFS.map(function (t) {
+        var checked = toolSettings[t.name] !== false ? ' checked' : '';
+        return '<div class="tool-item">' +
+          '<div class="tool-info">' +
+            '<div class="tool-name">' + esc(t.label) + '</div>' +
+            '<div class="tool-desc">' + esc(t.desc) + '</div>' +
+          '</div>' +
+          '<label class="toggle">' +
+            '<input type="checkbox" data-tool="' + esc(t.name) + '"' + checked + '>' +
+            '<span class="slider"></span>' +
+          '</label>' +
+        '</div>';
+      }).join('');
+
+      toolTogglesEl.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
+        cb.addEventListener('change', function () {
+          vscode.postMessage({
+            type: 'setToolEnabled',
+            toolName: cb.dataset.tool,
+            enabled: cb.checked
+          });
+        });
+      });
+    }
+    // ── MCP servers ──
+    var mcpListEl = document.getElementById('mcpList');
+    var mcpFormTitle = document.getElementById('mcpFormTitle');
+    var mcpTypeEl = document.getElementById('mcpType');
+    var mcpNameEl = document.getElementById('mcpName');
+    var mcpUrlGroup = document.getElementById('mcpUrlGroup');
+    var mcpUrlEl = document.getElementById('mcpUrl');
+    var mcpHeadersEl = document.getElementById('mcpHeaders');
+    var mcpHeadersGroup = document.getElementById('mcpHeadersGroup');
+    var mcpCmdGroup = document.getElementById('mcpCmdGroup');
+    var mcpArgsGroup = document.getElementById('mcpArgsGroup');
+    var mcpCommandEl = document.getElementById('mcpCommand');
+    var mcpArgsEl = document.getElementById('mcpArgs');
+    var mcpSaveBtn = document.getElementById('mcpSaveBtn');
+    var mcpCancelBtn = document.getElementById('mcpCancelBtn');
+    var addHeaderBtn = document.getElementById('addHeaderBtn');
+    var mcpEditingId = null;
+
+    // Track process statuses (id -> { running: bool })
+    var mcpStatuses = {};
+
+    // Toggle form fields based on type
+    mcpTypeEl.addEventListener('change', function() {
+      if (mcpTypeEl.value === 'stdio') {
+        mcpUrlGroup.style.display = 'none';
+        mcpHeadersGroup.style.display = 'none';
+        mcpCmdGroup.style.display = '';
+        mcpArgsGroup.style.display = '';
+      } else {
+        mcpUrlGroup.style.display = '';
+        mcpHeadersGroup.style.display = '';
+        mcpCmdGroup.style.display = 'none';
+        mcpArgsGroup.style.display = 'none';
+      }
+    });
+
+    function getHeaderRows() {
+      var rows = mcpHeadersEl.querySelectorAll('.header-row');
+      var headers = {};
+      rows.forEach(function(r) {
+        var key = r.querySelector('.hk').value.trim();
+        var val = r.querySelector('.hv').value.trim();
+        if (key) headers[key] = val;
+      });
+      return headers;
+    }
+
+    function setHeaderRows(headers) {
+      mcpHeadersEl.innerHTML = '';
+      headers = headers || {};
+      Object.keys(headers).forEach(function(k) {
+        addHeaderRow(k, headers[k]);
+      });
+      if (Object.keys(headers).length === 0) addHeaderRow('', '');
+    }
+
+    function addHeaderRow(key, val) {
+      var row = document.createElement('div');
+      row.className = 'header-row';
+      row.innerHTML =
+        '<input class="hk" placeholder="Header name" value="' + esc(key || '') + '">' +
+        '<input class="hv" placeholder="Value" value="' + esc(val || '') + '">' +
+        '<button title="Remove">&times;</button>';
+      row.querySelector('button').addEventListener('click', function() { row.remove(); });
+      mcpHeadersEl.appendChild(row);
+    }
+
+    function renderMcpList(servers) {
+      if (!servers || servers.length === 0) {
+        mcpListEl.innerHTML = '<div class="empty-hint">No MCP servers configured.</div>';
+        return;
+      }
+      mcpListEl.innerHTML = servers.map(function(s) {
+        var isStdio = !!(s.command);
+        var typeLabel = isStdio ? 'Local Process' : 'HTTP';
+        var detail = isStdio
+          ? esc(s.command) + (s.args && s.args.length ? ' ' + esc(s.args.join(' ')) : '')
+          : esc(s.url || '') + ' — Headers: ' + (Object.keys(s.headers || {}).join(', ') || 'none');
+        var checked = s.enabled !== false ? ' checked' : '';
+        var status = mcpStatuses[s.id];
+        var isRunning = status && status.running;
+        var statusDot = isRunning
+          ? '<span class="status-dot running" title="Running"></span>'
+          : '<span class="status-dot stopped" title="Stopped"></span>';
+        var startStopBtn = isStdio
+          ? (isRunning
+              ? '<button class="stop-btn" data-id="' + esc(s.id) + '" title="Stop Process">\u25A0</button>'
+              : '<button class="start-btn" data-id="' + esc(s.id) + '" title="Start Process">\u25B6</button>')
+          : '';
+        return '<div class="model-card">' +
+          '<div class="info">' +
+            '<div class="name">' + statusDot + ' ' + esc(s.name) + ' <span class="type-badge">' + typeLabel + '</span></div>' +
+            '<div class="detail">' + esc(detail) + '</div>' +
+          '</div>' +
+          '<div class="card-actions">' +
+            startStopBtn +
+            '<label class="toggle" style="display:inline-flex;vertical-align:middle;margin-right:4px">' +
+              '<input type="checkbox" class="mcp-toggle" data-id="' + esc(s.id) + '"' + checked + '>' +
+              '<span class="slider"></span>' +
+            '</label>' +
+            '<button class="edit-btn" data-id="' + esc(s.id) + '" title="Edit">' +
+              '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25a1.75 1.75 0 0 1 .445-.758l8.61-8.61zm1.414 1.06a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354l-1.086-1.086zM11.189 6.25L9.75 4.81l-6.286 6.287a.25.25 0 0 0-.064.108l-.558 1.953 1.953-.558a.25.25 0 0 0 .108-.064l6.286-6.286z" clip-rule="evenodd"/></svg>' +
+            '</button>' +
+            '<button class="del-btn" data-id="' + esc(s.id) + '" title="Delete">' +
+              '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M6.5 1.75a.25.25 0 0 1 .25-.25h2.5a.25.25 0 0 1 .25.25V3h-3V1.75zM4.75 3a.75.75 0 0 0-.74.873l1 10.5A.75.75 0 0 0 5.75 15h4.5a.75.75 0 0 0 .74-.627l1-10.5A.75.75 0 0 0 11.25 3H4.75zM3.22 3.22a.75.75 0 0 1 .53-.22h8.5a.75.75 0 0 1 0 1.5h-.53l-.98 10.27a2.25 2.25 0 0 1-2.22 1.98h-2.04a2.25 2.25 0 0 1-2.22-1.98l-.98-10.27h-.53a.75.75 0 0 1-.75-.75.75.75 0 0 1 .22-.53zM6 5.75a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-1.5 0v-6.5A.75.75 0 0 1 6 5.75zm4 0a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-1.5 0v-6.5A.75.75 0 0 1 10 5.75z" clip-rule="evenodd"/></svg>' +
+            '</button>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      mcpListEl.querySelectorAll('.edit-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var srv = servers.find(function(s) { return s.id === btn.dataset.id; });
+          if (srv) {
+            mcpEditingId = srv.id;
+            mcpFormTitle.textContent = 'Edit Server';
+            mcpSaveBtn.textContent = 'Save';
+            mcpCancelBtn.style.display = '';
+            mcpTypeEl.value = srv.command ? 'stdio' : 'http';
+            mcpTypeEl.dispatchEvent(new Event('change'));
+            mcpNameEl.value = srv.name;
+            mcpUrlEl.value = srv.url || '';
+            mcpCommandEl.value = srv.command || '';
+            mcpArgsEl.value = (srv.args || []).join(' ');
+            setHeaderRows(srv.headers || {});
+          }
+        });
+      });
+      mcpListEl.querySelectorAll('.del-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          if (mcpEditingId === btn.dataset.id) resetMcpForm();
+          vscode.postMessage({ type: 'deleteMcpServer', serverId: btn.dataset.id });
+        });
+      });
+
+      mcpListEl.querySelectorAll('.mcp-toggle').forEach(function(cb) {
+        cb.addEventListener('change', function() {
+          vscode.postMessage({
+            type: 'setMcpEnabled',
+            serverId: cb.dataset.id,
+            enabled: cb.checked
+          });
+        });
+      });
+
+      mcpListEl.querySelectorAll('.start-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          vscode.postMessage({ type: 'startMcpServer', serverId: btn.dataset.id });
+        });
+      });
+      mcpListEl.querySelectorAll('.stop-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          vscode.postMessage({ type: 'stopMcpServer', serverId: btn.dataset.id });
+        });
+      });
+    }
+
+    function resetMcpForm() {
+      mcpEditingId = null;
+      mcpFormTitle.textContent = 'Add Server';
+      mcpSaveBtn.textContent = 'Add Server';
+      mcpCancelBtn.style.display = 'none';
+      mcpTypeEl.value = 'http';
+      mcpTypeEl.dispatchEvent(new Event('change'));
+      mcpNameEl.value = '';
+      mcpUrlEl.value = '';
+      mcpCommandEl.value = '';
+      mcpArgsEl.value = '';
+      setHeaderRows({});
+    }
+
+    addHeaderBtn.addEventListener('click', function() { addHeaderRow('', ''); });
+    mcpCancelBtn.addEventListener('click', resetMcpForm);
+
+    mcpSaveBtn.addEventListener('click', function() {
+      var name = mcpNameEl.value.trim();
+      var type = mcpTypeEl.value;
+      if (!name) return;
+
+      var server = { name: name };
+      if (type === 'stdio') {
+        server.command = mcpCommandEl.value.trim();
+        server.args = mcpArgsEl.value.trim().split(/\s+/).filter(Boolean);
+        if (!server.command) return;
+      } else {
+        server.url = mcpUrlEl.value.trim();
+        if (!server.url) return;
+        server.headers = getHeaderRows();
+      }
+
+      if (mcpEditingId) {
+        vscode.postMessage({ type: 'updateMcpServer', serverId: mcpEditingId, server: server });
+      } else {
+        vscode.postMessage({ type: 'addMcpServer', server: server });
+      }
+      resetMcpForm();
+    });
+
+    // ── host messages ──
+    window.addEventListener('message', function (e) {
+      var msg = e.data;
+      if (msg.type === 'dataLoaded') {
+        window._lastMcpServers = msg.mcpServers || [];
+        renderModelList(msg.models);
+        systemPromptEl.value = msg.systemPrompt || '';
+        renderContextFlags(msg.contextFlags || {});
+        useAgentsMdToggle.checked = msg.useAgentsMd !== false;
+        agentsMdPathEl.value = msg.agentsMdPath || 'AGENTS.md';
+        renderToolToggles(msg.toolSettings || {});
+        renderMcpList(msg.mcpServers || []);
+      }
+      if (msg.type === 'mcpStatus') {
+        mcpStatuses = msg.statuses || {};
+        // Re-render the list if we have servers loaded
+        if (window._lastMcpServers) {
+          renderMcpList(window._lastMcpServers);
+        }
+      }
+    });
+
+    // Request initial data from extension host
+    vscode.postMessage({ type: 'requestData' });
+
+  </script>
+</body>
+</html>

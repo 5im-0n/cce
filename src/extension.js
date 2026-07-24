@@ -1,0 +1,626 @@
+const vscode = require("vscode");
+const path = require("path");
+const fs = require("fs");
+const Settings = require("./config/Settings");
+const log = require("./config/log").get();
+const ModelConfigPanel = require("./config/ModelConfigPanel");
+const { getProvider } = require("./providers/registry");
+const { getEnabledDefinitions } = require("./tools/definitions");
+const { executeToolCall } = require("./tools/executor");
+const { fetchMcpTools, callMcpTool } = require("./mcp/client");
+const processManager = require("./mcp/processManager");
+
+/**
+ * @implements {vscode.WebviewViewProvider}
+ */
+class ChatViewProvider {
+  constructor(context) {
+    this._context = context;
+    this._view = null;
+    this._conversation = [];
+    this._abortController = null;
+    this._msgListener = null;
+    this._currentSession = null;
+    this._restoreSession();
+  }
+
+  resolveWebviewView(webviewView) {
+    log.appendLine("resolveWebviewView called");
+    this._view = webviewView;
+    webviewView.webview.options = {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+    };
+    const htmlPath = path.join(this._context.extensionPath, "webview-ui", "chat.html");
+    const markedPath = path.join(this._context.extensionPath, "webview-ui", "marked.js");
+    let html = fs.readFileSync(htmlPath, "utf-8");
+    const markedJs = fs.readFileSync(markedPath, "utf-8");
+    html = html.replace("</head>", "<script>" + markedJs + "</script></head>");
+    webviewView.webview.html = html;
+    this._postModels();
+
+    // Restore saved session messages in the webview
+    if (this._currentSession && this._conversation.length > 0) {
+      webviewView.webview.postMessage({ type: "sessionSwitched", sessionId: this._currentSession });
+      webviewView.webview.postMessage({ type: "historyRestored", messages: this._conversation });
+    }
+    // Remove old listener before adding new one (prevents duplicates)
+    if (this._msgListener) this._msgListener.dispose();
+    this._msgListener = webviewView.webview.onDidReceiveMessage((msg) => {
+      log.appendLine("Received: " + msg.type);
+      switch (msg.type) {
+        case "configureModels":
+          try {
+            ModelConfigPanel.createOrShow(this._context, () => {
+              this._postModels();
+            });
+          } catch (err) {
+            vscode.window.showErrorMessage("CCE: " + err.message);
+          }
+          break;
+        case "setModel":
+          if (msg.modelId) {
+            Settings.setDefaultModel(msg.modelId);
+            this._postModels();
+          }
+          break;
+        case "requestModels":
+          this._postModels();
+          break;
+        case "sendMessage":
+          this._handleSendMessage(msg.messageId, msg.text, msg.images);
+          break;
+        case "cancelMessage":
+          this._handleCancel();
+          break;
+        case "attachImage":
+          this._handleAttachImage();
+          break;
+        case "newSession":
+          this._newSession();
+          break;
+        case "switchSession":
+          this._switchSession(msg.sessionId);
+          break;
+        case "deleteSession":
+          this._deleteSession(msg.sessionId);
+          break;
+        case "requestSessions":
+          this._postSessions();
+          break;
+      }
+    });
+  }
+
+  _postModels() {
+    if (!this._view) return;
+    const models = Settings.getModels();
+    log.appendLine("Posting modelsLoaded: " + models.length + " models");
+    this._view.webview.postMessage({
+      type: "modelsLoaded",
+      models: models.map((m) => ({ id: m.id, name: m.name })),
+      activeModel: Settings.getDefaultModel(),
+    });
+  }
+
+  // ── sessions ──
+
+  _restoreSession() {
+    this._currentSession = Settings.getCurrentSessionId();
+    if (this._currentSession) {
+      const sessions = Settings.getSessions();
+      const session = sessions.find((s) => s.id === this._currentSession);
+      if (session) {
+        this._conversation = session.messages || [];
+      }
+    }
+  }
+
+  _ensureSession() {
+    if (!this._currentSession) {
+      const id = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+        let r = (Math.random() * 16) | 0;
+        return c === "x" ? r : (r & 0x3) | 0x8;
+      });
+      this._currentSession = id;
+      Settings.setCurrentSessionId(id);
+    }
+  }
+
+  async _saveSession() {
+    // Never save empty sessions
+    if (!this._conversation || this._conversation.length === 0) return;
+
+    this._ensureSession();
+
+    let sessions = Settings.getSessions();
+    // Clean out any other empty sessions
+    sessions = sessions.filter((s) => s.messages && s.messages.length > 0);
+    let session = sessions.find((s) => s.id === this._currentSession);
+
+    if (session) {
+      session.messages = this._conversation;
+      session.updatedAt = new Date().toISOString();
+      // Auto-title from first user message if still generic
+      if (session.title && session.title.startsWith("Chat ")) {
+        const firstUser = this._conversation.find((m) => m.role === "user");
+        if (firstUser) {
+          session.title = firstUser.content.slice(0, 50).replace(/\n/g, " ");
+        }
+      }
+    } else {
+      const now = new Date().toISOString();
+      const firstUser = this._conversation.find((m) => m.role === "user");
+      const title = firstUser ? firstUser.content.slice(0, 50).replace(/\n/g, " ") : "Chat";
+      sessions.push({
+        id: this._currentSession,
+        title,
+        createdAt: now,
+        updatedAt: now,
+        messages: this._conversation,
+      });
+    }
+
+    await Settings.setSessions(sessions);
+  }
+
+  _postSessions() {
+    if (!this._view) return;
+    // Filter out empty sessions when displaying
+    const sessions = Settings.getSessions().filter((s) => s.messages && s.messages.length > 0);
+    this._view.webview.postMessage({
+      type: "sessionsLoaded",
+      sessions,
+      currentSessionId: this._currentSession,
+    });
+  }
+
+  _newSession() {
+    // Save current session first if it has content
+    this._saveSession();
+    // Start fresh — session will be persisted only when first message is sent
+    this._currentSession = null;
+    this._conversation = [];
+    Settings.setCurrentSessionId("");
+    this._postSessions();
+    if (this._view) {
+      this._view.webview.postMessage({ type: "sessionSwitched", sessionId: "" });
+      this._view.webview.postMessage({ type: "historyRestored", messages: [] });
+    }
+  }
+
+  _switchSession(sessionId) {
+    // Save current session before switching away
+    this._saveSession();
+    const sessions = Settings.getSessions();
+    const session = sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    this._currentSession = sessionId;
+    Settings.setCurrentSessionId(sessionId);
+    this._conversation = session.messages || [];
+    if (this._view) {
+      this._view.webview.postMessage({ type: "sessionSwitched", sessionId });
+      this._view.webview.postMessage({ type: "historyRestored", messages: this._conversation });
+    }
+  }
+
+  _deleteSession(sessionId) {
+    let sessions = Settings.getSessions();
+    sessions = sessions.filter((s) => s.id !== sessionId);
+    Settings.setSessions(sessions);
+    if (this._currentSession === sessionId) {
+      if (sessions.length > 0) {
+        this._switchSession(sessions[0].id);
+      } else {
+        this._currentSession = null;
+        this._conversation = [];
+        Settings.setCurrentSessionId("");
+        if (this._view) this._view.webview.postMessage({ type: "historyRestored", messages: [] });
+      }
+    }
+    this._postSessions();
+  }
+
+  // ── messaging ──
+
+  _postError(messageId, error) {
+    if (this._view) this._view.webview.postMessage({ type: "error", messageId, error });
+  }
+
+  async _handleSendMessage(messageId, text, images) {
+    const modelConfigId = Settings.getDefaultModel();
+    if (!modelConfigId) {
+      this._postError(messageId, "No model configured. Click the settings gear to add one.");
+      return;
+    }
+
+    const models = Settings.getModels();
+    const modelConfig = models.find((m) => m.id === modelConfigId);
+    if (!modelConfig) {
+      this._postError(messageId, "Selected model not found.");
+      return;
+    }
+
+    const apiKey = await Settings.getApiKey(modelConfig.id);
+    const provider = getProvider(modelConfig.provider);
+    if (!provider) {
+      this._postError(messageId, "Unknown provider: " + modelConfig.provider);
+      return;
+    }
+    this._conversation.push({ role: "user", content: text, images: images || [] });
+    this._ensureSession();
+
+    // Build system prompt with context flags and AGENTS.md
+    // Build system prompt with context flags and AGENTS.md
+    let systemPrompt = Settings.getSystemPrompt() || "";
+
+    // Inject AGENTS.md content if enabled
+    if (Settings.getUseAgentsMd()) {
+      try {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+          const agentsPath = path.join(workspaceFolders[0].uri.fsPath, Settings.getAgentsMdPath());
+          if (fs.existsSync(agentsPath)) {
+            const agentsContent = fs.readFileSync(agentsPath, "utf-8");
+            systemPrompt = "<!-- AGENTS.md / Project Instructions -->\n" + agentsContent + "\n\n" + systemPrompt;
+          }
+        }
+      } catch (e) {
+        log.appendLine("Failed to read AGENTS.md: " + e.message);
+      }
+    }
+
+    // Inject context flags
+    const contextFlags = Settings.getContextFlags();
+    const contextParts = [];
+    const now = new Date();
+    if (contextFlags.includeDate !== false) {
+      contextParts.push("Current date: " + now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }));
+    }
+    if (contextFlags.includeOS !== false) {
+      contextParts.push("Platform/OS: " + process.platform);
+    }
+    if (contextFlags.includeRegion !== false) {
+      contextParts.push("Locale: " + (Intl.DateTimeFormat().resolvedOptions().locale || "unknown") + ", Timezone: " + (Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown"));
+    }
+    if (contextParts.length > 0) {
+      systemPrompt = "<!-- Context -->\n" + contextParts.join("\n") + "\n\n" + systemPrompt;
+    }
+
+    const messages = this._convertToChatMessages(systemPrompt);
+    // Gather enabled tools
+    let tools = getEnabledDefinitions(Settings.getToolSettings());
+
+    // Fetch MCP tools (both HTTP and stdio)
+    try {
+      const mcpTools = await fetchMcpTools();
+      tools = tools.concat(mcpTools);
+    } catch (e) {
+      log.appendLine("MCP fetch FAILED: " + (e.stack || e.message));
+    }
+
+    log.appendLine("Sending " + tools.length + " total tools to model");
+    this._abortController = new AbortController();
+
+    try {
+      await this._chatLoop(messageId, messages, modelConfig, apiKey, provider, tools);
+    } catch (err) {
+      if (err.name === "AbortError") {
+        if (this._view) this._view.webview.postMessage({ type: "responseComplete", messageId });
+        return;
+      }
+      this._postError(messageId, err.message || "Unknown error");
+    } finally {
+      this._abortController = null;
+    }
+  }
+
+  async _chatLoop(messageId, messages, modelConfig, apiKey, provider, tools) {
+    const result = await provider.chat(
+      messages, modelConfig.modelId, modelConfig.endpoint, apiKey,
+      (chunk) => { if (this._view) this._view.webview.postMessage({ type: "partialResponse", messageId, text: chunk }); },
+      this._abortController.signal,
+      tools.length > 0 ? tools : undefined,
+      (thinking) => { if (this._view) this._view.webview.postMessage({ type: "thinkingDelta", messageId, text: thinking }); }
+    );
+
+    if (result.toolCalls && result.toolCalls.length > 0) {
+      messages.push({ role: "assistant", content: null, tool_calls: result.toolCalls });
+      for (const tc of result.toolCalls) {
+        if (this._view) this._view.webview.postMessage({ type: "toolStatus", text: "Running " + tc.function.name + "\u2026" });
+        let toolResult, toolArgs;
+        try {
+          toolArgs = JSON.parse(tc.function.arguments || "{}");
+
+          // Route MCP tools to the MCP client
+          if (tc.function.name.startsWith("mcp__")) {
+            const parts = tc.function.name.split("__");
+            const serverId = parts[1];
+            const toolName = parts.slice(2).join("__");
+            toolResult = await callMcpTool(serverId, toolName, toolArgs);
+          } else if (tc.function.name === "agent") {
+            toolResult = await this._runAgent(toolArgs, modelConfig, apiKey, provider);
+          } else {
+            toolResult = await executeToolCall(tc.function.name, toolArgs);
+          }
+        } catch (e) { toolResult = "Error: " + e.message; toolArgs = {}; }
+
+        // Show tool details in chat
+        if (this._view) {
+          this._view.webview.postMessage({
+            type: "toolCall",
+            messageId,
+            toolName: tc.function.name,
+            args: JSON.stringify(toolArgs, null, 2),
+            result: String(toolResult).slice(0, 2000),
+          });
+        }
+
+        messages.push({ role: "tool", tool_call_id: tc.id, content: toolResult });
+      }
+      await this._chatLoop(messageId, messages, modelConfig, apiKey, provider, tools);
+      return;
+    }
+
+    this._conversation.push({ role: "assistant", content: result.text });
+    await this._saveSession();
+
+    log.appendLine("Response: text=" + (result.text ? result.text.length + " chars" : "empty") + ", thinking=" + (result.thinking ? result.thinking.length + " chars" : "none"));
+
+    // If the model only produced thinking/reasoning but no text,
+    // send the thinking content as the visible response
+    if (!result.text && result.thinking && this._view) {
+      log.appendLine("Fallback: sending thinking as response");
+      this._view.webview.postMessage({ type: "partialResponse", messageId, text: result.thinking });
+    }
+
+    if (this._view) this._view.webview.postMessage({ type: "responseComplete", messageId });
+  }
+
+  async _runAgent(args, modelConfig, apiKey, provider) {
+    const tasks = args.tasks || [];
+    if (!tasks.length) return "No tasks provided.";
+
+    // Give sub-agents all tools except 'agent' (prevents infinite recursion)
+    let subTools = getEnabledDefinitions(Settings.getToolSettings())
+      .filter(t => t.function.name !== "agent");
+
+    // Also include MCP tools so sub-agents can search the web, etc.
+    try {
+      const mcpTools = await fetchMcpTools();
+      subTools = subTools.concat(mcpTools.filter(t => t.function.name !== "agent"));
+    } catch (e) {
+      log.appendLine("Agent: MCP fetch failed: " + (e.stack || e.message));
+    }
+
+    log.appendLine("Agent: spawning " + tasks.length + " sub-agents with " + subTools.length + " tools");
+
+    const MAX_TOOL_ROUNDS = 10; // Prevent infinite loops
+
+    const results = await Promise.all(tasks.map(async (task, i) => {
+      try {
+        const messages = [{ role: "user", content: String(task) }];
+        let round = 0;
+
+        while (round < MAX_TOOL_ROUNDS) {
+          round++;
+          const result = await provider.chat(
+            messages,
+            modelConfig.modelId, modelConfig.endpoint, apiKey,
+            () => {}, // no streaming for sub-agents
+            new AbortController().signal,
+            subTools.length > 0 ? subTools : undefined
+          );
+
+          // If the model returned tool calls, execute them and loop
+          if (result.toolCalls && result.toolCalls.length > 0) {
+            log.appendLine("Agent task " + (i + 1) + " round " + round + ": " + result.toolCalls.length + " tool call(s)");
+            messages.push({ role: "assistant", content: null, tool_calls: result.toolCalls });
+
+            for (const tc of result.toolCalls) {
+              let toolResult, toolArgs;
+              try {
+                toolArgs = JSON.parse(tc.function.arguments || "{}");
+
+                // Route MCP tools to the MCP client
+                if (tc.function.name.startsWith("mcp__")) {
+                  const parts = tc.function.name.split("__");
+                  const serverId = parts[1];
+                  const toolName = parts.slice(2).join("__");
+                  toolResult = await callMcpTool(serverId, toolName, toolArgs);
+                } else {
+                  toolResult = await executeToolCall(tc.function.name, toolArgs);
+                }
+              } catch (e) {
+                toolResult = "Error: " + e.message;
+                toolArgs = {};
+              }
+
+              messages.push({ role: "tool", tool_call_id: tc.id, content: String(toolResult) });
+            }
+
+            // Continue the loop to let the model process tool results
+            continue;
+          }
+
+          // No tool calls — model produced a final answer
+          return "Task " + (i + 1) + " result:\n" + (result.text || "(no output)");
+        }
+
+        // Exhausted max rounds — ask model for one final summary (no tools)
+        log.appendLine("Agent task " + (i + 1) + ": max rounds reached, requesting final summary");
+        const finalResult = await provider.chat(
+          messages.concat([{ role: "user", content: "You have reached the maximum number of tool-calling rounds. Please provide your best answer now based on the information gathered so far. Do not call any more tools." }]),
+          modelConfig.modelId, modelConfig.endpoint, apiKey,
+          () => {},
+          new AbortController().signal,
+          undefined // no tools available for final summary
+        );
+        return "Task " + (i + 1) + " result (max rounds reached):\n" + (finalResult.text || "(no output)");
+      } catch (e) {
+        return "Task " + (i + 1) + " error: " + e.message;
+      }
+    }));
+
+    return results.join("\n\n");
+    return results.join("\n\n");
+  }
+
+  // ── image attachment ──
+
+  async _handleAttachImage() {
+    const uris = await vscode.window.showOpenDialog({
+      canSelectMany: true,
+      filters: { Images: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] },
+      title: "Attach Images",
+    });
+    if (!uris || uris.length === 0) return;
+
+    const result = await this._validateAndEncodeImages(uris);
+    if (this._view) {
+      if (result.images.length > 0) {
+        this._view.webview.postMessage({ type: "imagesAttached", images: result.images });
+      }
+      if (result.errors.length > 0) {
+        this._view.webview.postMessage({ type: "imagesAttachedError", errors: result.errors });
+      }
+    }
+  }
+
+  async _validateAndEncodeImages(uris) {
+    const images = [];
+    const errors = [];
+    const MAX_SOFT = 5 * 1024 * 1024; // 5MB
+    const MAX_HARD = 20 * 1024 * 1024; // 20MB
+
+    for (const uri of uris) {
+      try {
+        const stat = await fs.promises.stat(uri.fsPath);
+        if (stat.size > MAX_HARD) {
+          errors.push({ name: path.basename(uri.fsPath), error: "File exceeds 20MB limit (" + (stat.size / 1024 / 1024).toFixed(1) + "MB)" });
+          continue;
+        }
+        const ext = path.extname(uri.fsPath).toLowerCase().replace(".", "");
+        const mimeTypes = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
+        const mime = mimeTypes[ext] || "image/png";
+        const buffer = await fs.promises.readFile(uri.fsPath);
+        const dataUrl = "data:" + mime + ";base64," + buffer.toString("base64");
+        images.push({
+          id: "img-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6),
+          name: path.basename(uri.fsPath),
+          dataUrl,
+          size: stat.size,
+          warning: stat.size > MAX_SOFT,
+        });
+      } catch (e) {
+        errors.push({ name: path.basename(uri.fsPath), error: e.message });
+      }
+    }
+    return { images, errors };
+  }
+
+  _convertToChatMessages(systemPrompt) {
+    const messages = [];
+    if (systemPrompt.trim()) {
+      messages.push({ role: "system", content: systemPrompt.trim() });
+    }
+    for (const m of this._conversation) {
+      if (m.images && m.images.length > 0) {
+        messages.push({
+          role: m.role,
+          content: [
+            { type: "text", text: m.content || "" },
+            ...m.images.map(img => ({ type: "image_url", image_url: { url: img.dataUrl } }))
+          ]
+        });
+      } else {
+        messages.push({ role: m.role, content: m.content });
+      }
+    }
+    return messages;
+  }
+
+  _handleCancel() {
+    if (this._abortController) {
+      this._abortController.abort();
+      this._abortController = null;
+    }
+  }
+
+  // ── clean up ──
+
+  dispose() {
+    if (this._msgListener) this._msgListener.dispose();
+  }
+}
+
+// ── extension entry points ──
+
+/**
+ * @param {vscode.ExtensionContext} context
+ */
+function activate(context) {
+  log.appendLine("CCE activating\u2026");
+
+  Settings.init(context);
+
+  // Register the chat view
+  const chatProvider = new ChatViewProvider(context);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider("cce.chatView", chatProvider, {
+      webviewOptions: { retainContextWhenHidden: true },
+    })
+  );
+
+  // Register config panel command
+  context.subscriptions.push(
+    vscode.commands.registerCommand("cce.openChat", () => {
+      vscode.commands.executeCommand("cce.chatView.focus");
+    })
+  );
+
+  // Start all enabled stdio MCP servers
+  _startMcpServers();
+
+  // Restart MCP servers when config changes
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("cce")) {
+        log.appendLine("Config changed, restarting MCP servers\u2026");
+        // Restart all stdio servers (stop all, start enabled ones)
+        processManager.stopAll();
+        _startMcpServers();
+      }
+    })
+  );
+
+  log.appendLine("CCE activated");
+}
+
+/**
+ * Start all enabled stdio-based MCP servers from settings.
+ */
+function _startMcpServers() {
+  const servers = Settings.getMcpServers();
+  for (const server of servers) {
+    if (server.enabled !== false && server.command) {
+      try {
+        processManager.start(server);
+      } catch (e) {
+        log.appendLine("Failed to start MCP server \"" + server.name + "\": " + e.message);
+      }
+    }
+  }
+}
+
+/**
+ * @param {vscode.ExtensionContext} context
+ */
+function deactivate() {
+  log.appendLine("CCE deactivating\u2026");
+  processManager.stopAll();
+  log.appendLine("CCE deactivated");
+}
+
+module.exports = { activate, deactivate };
+

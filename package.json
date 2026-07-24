@@ -1,0 +1,67 @@
+{
+  "name": "cce",
+  "displayName": "CCE - Code Chat Extension",
+  "description": "AI-powered chatbot for code assistance with multi-model support",
+  "version": "0.0.1",
+  "publisher": "5im-on",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/cce"
+  },
+  "keywords": ["chat", "ai", "llm", "coding-assistant"],
+  "icon": "resources/icon.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:cce.chatView",
+    "onCommand:cce.openChat"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "cce",
+          "title": "CCE Chat",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "cce": [
+        {
+          "type": "webview",
+          "id": "cce.chatView",
+          "name": "Chat",
+          "icon": "$(comment-discussion)",
+          "contextValue": "cce.chatView"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "cce.openChat",
+        "title": "CCE: Open Chat",
+        "icon": "$(comment-discussion)"
+      }
+    ]
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "eslint": "^8.50.0"
+  },
+  "dependencies": {
+    "marked": "^18.0.7"
+  }
+}
