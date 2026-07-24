@@ -1,4 +1,5 @@
 const openaiProvider = require("./openai");
+const anthropicProvider = require("./anthropic");
 
 /**
  * Provider registry — maps provider type strings to provider objects.
@@ -8,7 +9,7 @@ const openaiProvider = require("./openai");
  */
 const registry = {
   openai: openaiProvider,
-  // anthropic: require("./anthropic"),
+  anthropic: anthropicProvider,
 };
 
 /**
