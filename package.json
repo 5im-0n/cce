@@ -2,12 +2,12 @@
   "name": "cce",
   "displayName": "CCE - Code Chat Extension",
   "description": "AI-powered chatbot for code assistance with multi-model support",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "5im-on",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/cce"
+    "url": "https://github.com/5im-0n/cce"
   },
   "keywords": ["chat", "ai", "llm", "coding-assistant"],
   "icon": "resources/icon.png",
