@@ -556,6 +556,17 @@
     var thinkingEl = null;
     var currentMode = null; // "thinking" | "text" | null
     var attachedImages = []; // [{ id, name, dataUrl, size, warning? }]
+
+    // ── scroll helpers ──
+    function isNearBottom() {
+      var threshold = 50;
+      return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < threshold;
+    }
+
+    function scrollToBottom() {
+      if (isNearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
     // ── send ──
     function sendMessage() {
       var t = textarea.value.trim();
@@ -616,7 +627,7 @@
         }
         messagesEl.appendChild(el);
       }
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      scrollToBottom();
     }
 
     // ── thinking indicator ──
@@ -628,7 +639,7 @@
         "<span>" + escH(label) + "</span>" +
         "<span class='dots'><span></span><span></span><span></span></span>";
       messagesEl.appendChild(thinkingEl);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      scrollToBottom();
     }
 
     function hideThinking() {
@@ -830,7 +841,7 @@
         var tc = streamingEl.querySelector(".tc");
         tc._rt = (tc._rt || "") + m.text;
         tc.innerHTML = renderMD(tc._rt);
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+        scrollToBottom();
       } else if (m.type === "toolCall") {
         hideThinking();
         closeStream();
@@ -841,7 +852,7 @@
           "<div class='tool-body args'>" + escH(m.args || "") + "</div>" +
           "<div class='tool-body result'>" + escH(m.result || "(no output)") + "</div>";
         messagesEl.appendChild(tc);
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+        scrollToBottom();
       } else if (m.type === "toolStatus") {
         showThinking(m.text);
       } else if (m.type === "partialResponse") {
@@ -856,7 +867,7 @@
         }
         streamingEl._rt = (streamingEl._rt || "") + m.text;
         streamingEl.innerHTML = renderMD(streamingEl._rt);
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+        scrollToBottom();
       } else if (m.type === "responseComplete") {
         closeStream();
         hideThinking();
