@@ -66,7 +66,7 @@ function readFile(root, filePath, offset, limit) {
   const totalLines = lines.length;
 
   const start = Math.max(0, (offset || 1) - 1);
-  const end = limit ? start + limit : Math.min(start + 500, totalLines);
+  const end = limit ? start + limit : Math.min(start + 2000, totalLines);
   const slice = lines.slice(start, end);
 
   // Number the lines
