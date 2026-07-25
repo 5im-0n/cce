@@ -324,6 +324,10 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1.5 2.75a.25.25 0 0 1 .25-.25h3a.25.25 0 0 1 .25.25v3a.25.25 0 0 1-.25.25h-3a.25.25 0 0 1-.25-.25v-3zm1.5 3V3.25h1.5V5.5H3zm7.75-3a.25.25 0 0 1 .25-.25h3a.25.25 0 0 1 .25.25v3a.25.25 0 0 1-.25.25h-3a.25.25 0 0 1-.25-.25v-3zm1.5 3V3.25h1.5V5.5h-1.5zm-6.5 4.5a.25.25 0 0 1 .25-.25h3a.25.25 0 0 1 .25.25v3a.25.25 0 0 1-.25.25h-3a.25.25 0 0 1-.25-.25v-3zm1.5 3v-1.5h1.5v1.5h-1.5zm5.75-3a.25.25 0 0 1 .25-.25h3a.25.25 0 0 1 .25.25v3a.25.25 0 0 1-.25.25h-3a.25.25 0 0 1-.25-.25v-3zm1.5 3v-1.5h1.5v1.5h-1.5z" clip-rule="evenodd"/></svg>
       MCP
     </button>
+    <button class="tab-btn" data-tab="sessions">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M0 1.75A.75.75 0 0 1 .75 1h4.253c1.227 0 2.317.59 3 1.501A3.743 3.743 0 0 1 11.006 1h4.245a.75.75 0 0 1 .75.75v10.5a.75.75 0 0 1-.75.75h-4.507a2.25 2.25 0 0 0-1.591.659l-.622.621a.75.75 0 0 1-1.06 0l-.622-.621A2.25 2.25 0 0 0 5.258 13H.75a.75.75 0 0 1-.75-.75V1.75zm8.755 3a2.25 2.25 0 0 1 2.25-2.25H14.5v9h-3.757c-.71 0-1.4.201-1.992.572l.004-7.322zm-1.504 7.324.004-5.073-.002-2.253A2.25 2.25 0 0 0 5.003 2.5H1.5v9h3.757a3.75 3.75 0 0 1 1.994.574z" clip-rule="evenodd"/></svg>
+      Sessions
+    </button>
   </nav>
 
   <!-- ── Models tab ── -->
@@ -452,7 +456,28 @@
       <button class="btn-primary" id="mcpSaveBtn">Add Server</button>
       <button class="btn-secondary" id="mcpCancelBtn" style="display:none">Cancel</button>
     </div>
+  </section>
 
+  <!-- ── Sessions tab ── -->
+  <section class="tab-content" id="tab-sessions">
+    <h2>Sessions</h2>
+
+    <div id="sessionList"></div>
+
+    <div class="session-retention" style="margin-top:32px; padding-top:20px; border-top: 1px solid var(--vscode-sideBarSectionHeader-border);">
+      <label for="sessionsMaxAge" style="display:block; font-size:12px; font-weight:600; margin-bottom:6px; color:var(--vscode-descriptionForeground);">
+        Auto-delete sessions not updated for
+      </label>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <input type="number" id="sessionsMaxAge" min="0" value="0" style="width:70px; padding:6px 10px; font-size:13px; border:1px solid var(--vscode-input-border); background:var(--vscode-input-background); color:var(--vscode-input-foreground); border-radius:4px;" />
+        <span style="font-size:13px;">days</span>
+        <span class="api-key-hint" style="margin-left:4px;">(0 = never)</span>
+      </div>
+      <div class="actions" style="margin-top:12px;">
+        <button class="btn-primary" id="deleteExpiredBtn">Delete All Expired</button>
+      </div>
+    </div>
+  </section>
 
   <script>
     var vscode = acquireVsCodeApi();
@@ -871,6 +896,66 @@
       resetMcpForm();
     });
 
+    // ── Sessions tab ──
+    var sessionListEl = document.getElementById('sessionList');
+    var sessionsMaxAgeEl = document.getElementById('sessionsMaxAge');
+    var deleteExpiredBtn = document.getElementById('deleteExpiredBtn');
+
+    sessionsMaxAgeEl.addEventListener('change', function () {
+      var val = parseInt(sessionsMaxAgeEl.value, 10);
+      if (isNaN(val) || val < 0) val = 0;
+      sessionsMaxAgeEl.value = val;
+      vscode.postMessage({ type: 'setSessionsMaxAge', maxAgeDays: val });
+    });
+
+    deleteExpiredBtn.addEventListener('click', function () {
+      vscode.postMessage({ type: 'deleteExpiredSessions' });
+    });
+
+    function timeAgo(dateStr) {
+      var ms = Date.now() - new Date(dateStr).getTime();
+      var sec = Math.floor(ms / 1000);
+      if (sec < 60) return 'just now';
+      var min = Math.floor(sec / 60);
+      if (min < 60) return min + ' min ago';
+      var hour = Math.floor(min / 60);
+      if (hour < 24) return hour + ' hour' + (hour > 1 ? 's' : '') + ' ago';
+      var day = Math.floor(hour / 24);
+      if (day < 30) return day + ' day' + (day > 1 ? 's' : '') + ' ago';
+      var month = Math.floor(day / 30);
+      return month + ' month' + (month > 1 ? 's' : '') + ' ago';
+    }
+
+    function renderSessionList(sessions) {
+      if (!sessions || sessions.length === 0) {
+        sessionListEl.innerHTML = '<div class="empty-hint">No saved sessions.</div>';
+        return;
+      }
+      sessionListEl.innerHTML = sessions.map(function (s) {
+        var scopeBadge = s.scope === 'global'
+          ? '<span class="type-badge" title="Stored globally (all workspaces)">\uD83C\uDF10 Global</span>'
+          : '<span class="type-badge" title="Stored in this workspace only">\uD83D\uDCC1 Workspace</span>';
+        var msgCount = (s.messages || []).length;
+        return '<div class="model-card">' +
+          '<div class="info">' +
+            '<div class="name">' + esc(s.title || 'Untitled') + ' ' + scopeBadge + '</div>' +
+            '<div class="detail">' + msgCount + ' message' + (msgCount !== 1 ? 's' : '') + ' \u00B7 Updated ' + timeAgo(s.updatedAt) + '</div>' +
+          '</div>' +
+          '<div class="card-actions">' +
+            '<button class="del-btn" data-id="' + esc(s.id) + '" data-scope="' + esc(s.scope) + '" title="Delete">' +
+              '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M6.5 1.75a.25.25 0 0 1 .25-.25h2.5a.25.25 0 0 1 .25.25V3h-3V1.75zM4.75 3a.75.75 0 0 0-.74.873l1 10.5A.75.75 0 0 0 5.75 15h4.5a.75.75 0 0 0 .74-.627l1-10.5A.75.75 0 0 0 11.25 3H4.75zM3.22 3.22a.75.75 0 0 1 .53-.22h8.5a.75.75 0 0 1 0 1.5h-.53l-.98 10.27a2.25 2.25 0 0 1-2.22 1.98h-2.04a2.25 2.25 0 0 1-2.22-1.98l-.98-10.27h-.53a.75.75 0 0 1-.75-.75.75.75 0 0 1 .22-.53zM6 5.75a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-1.5 0v-6.5A.75.75 0 0 1 6 5.75zm4 0a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-1.5 0v-6.5A.75.75 0 0 1 10 5.75z" clip-rule="evenodd"/></svg>' +
+            '</button>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      sessionListEl.querySelectorAll('.del-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          vscode.postMessage({ type: 'deleteSession', sessionId: btn.dataset.id, scope: btn.dataset.scope });
+        });
+      });
+    }
+
     // ── host messages ──
     window.addEventListener('message', function (e) {
       var msg = e.data;
@@ -883,6 +968,8 @@
         agentsMdPathEl.value = msg.agentsMdPath || 'AGENTS.md';
         renderToolToggles(msg.toolSettings || {});
         renderMcpList(msg.mcpServers || []);
+        renderSessionList(msg.sessions || []);
+        sessionsMaxAgeEl.value = msg.sessionsMaxAge || 0;
       }
       if (msg.type === 'mcpStatus') {
         mcpStatuses = msg.statuses || {};

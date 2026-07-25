@@ -561,6 +561,9 @@ function activate(context) {
 
   Settings.init(context);
 
+  // Delete sessions older than the configured max age
+  Settings.deleteExpiredSessions();
+
   // Register the chat view
   const chatProvider = new ChatViewProvider(context);
   context.subscriptions.push(

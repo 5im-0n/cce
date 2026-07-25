@@ -18,6 +18,7 @@ const TOOLS_KEY = "cce.tools";
 const CONTEXT_KEY = "cce.contextFlags";
 const SESSIONS_KEY = "cce.sessions";
 const CURRENT_SESSION_KEY = "cce.currentSessionId";
+const SESSIONS_MAX_AGE_KEY = "cce.sessionsMaxAge";
 const MCP_KEY = "cce.mcpServers";
 const API_KEY_PREFIX = "cce.apiKey.";
 
@@ -196,6 +197,72 @@ async function setCurrentSessionId(id) {
 }
 
 /**
+ * Max age in days before sessions are auto-deleted. 0 = never.
+ * Stored in globalState so it applies everywhere.
+ * @returns {number}
+ */
+function getSessionsMaxAge() {
+  return _ctx.globalState.get(SESSIONS_MAX_AGE_KEY, 0);
+}
+
+/**
+ * @param {number} age - days (0 = never)
+ */
+async function setSessionsMaxAge(age) {
+  await _ctx.globalState.update(SESSIONS_MAX_AGE_KEY, age);
+}
+
+/**
+ * Return all sessions from BOTH scopes, each tagged with its origin.
+ * Workspace sessions are only included when a workspace/folder is open.
+ * @returns {Array<Session & { scope: "global" | "workspace" }>}
+ */
+function getAllSessions() {
+  const globalSessions = (_ctx.globalState.get(SESSIONS_KEY, []) || []).map((s) => ({ ...s, scope: "global" }));
+  const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0;
+  if (!hasWorkspace) {
+    return globalSessions;
+  }
+  const workspaceSessions = (_ctx.workspaceState.get(SESSIONS_KEY, []) || []).map((s) => ({ ...s, scope: "workspace" }));
+  // Merge: workspace sessions first (most relevant), then global
+  return [...workspaceSessions, ...globalSessions];
+}
+
+/**
+ * Delete a single session from its scope.
+ * @param {string} sessionId
+ * @param {"global"|"workspace"} scope
+ */
+async function deleteSession(sessionId, scope) {
+  const storage = scope === "workspace" ? _ctx.workspaceState : _ctx.globalState;
+  let sessions = storage.get(SESSIONS_KEY, []) || [];
+  sessions = sessions.filter((s) => s.id !== sessionId);
+  await storage.update(SESSIONS_KEY, sessions);
+}
+
+/**
+ * Delete all sessions (global + workspace) older than the configured maxAgeDays.
+ */
+async function deleteExpiredSessions() {
+  const maxAge = getSessionsMaxAge();
+  if (maxAge <= 0) return;
+  const cutoff = Date.now() - maxAge * 86400000;
+
+  // Global sessions
+  let globalSessions = _ctx.globalState.get(SESSIONS_KEY, []) || [];
+  globalSessions = globalSessions.filter((s) => new Date(s.updatedAt).getTime() >= cutoff);
+  await _ctx.globalState.update(SESSIONS_KEY, globalSessions);
+
+  // Workspace sessions (if a workspace is open)
+  const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0;
+  if (hasWorkspace) {
+    let wsSessions = _ctx.workspaceState.get(SESSIONS_KEY, []) || [];
+    wsSessions = wsSessions.filter((s) => new Date(s.updatedAt).getTime() >= cutoff);
+    await _ctx.workspaceState.update(SESSIONS_KEY, wsSessions);
+  }
+}
+
+/**
  * @typedef {Object} Session
  * @property {string} id
  * @property {string} title
@@ -229,5 +296,5 @@ async function setMcpServers(servers) {
   await _ctx.globalState.update(MCP_KEY, servers);
 }
 
-module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getMcpServers, setMcpServers };
+module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getMcpServers, setMcpServers };
 

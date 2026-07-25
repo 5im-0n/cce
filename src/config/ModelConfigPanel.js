@@ -89,6 +89,15 @@ class ModelConfigPanel {
         case "stopMcpServer":
           await ModelConfigPanel._stopMcpServer(msg.serverId);
           break;
+        case "deleteSession":
+          await ModelConfigPanel._deleteSession(msg.sessionId, msg.scope);
+          break;
+        case "setSessionsMaxAge":
+          await Settings.setSessionsMaxAge(msg.maxAgeDays);
+          break;
+        case "deleteExpiredSessions":
+          await ModelConfigPanel._deleteExpiredSessions();
+          break;
         case "requestData":
           ModelConfigPanel._postData();
           break;
@@ -116,6 +125,8 @@ class ModelConfigPanel {
       useAgentsMd: Settings.getUseAgentsMd(),
       agentsMdPath: Settings.getAgentsMdPath(),
       mcpServers: Settings.getMcpServers(),
+      sessions: Settings.getAllSessions(),
+      sessionsMaxAge: Settings.getSessionsMaxAge(),
     });
     // Also send process status
     ModelConfigPanel._postMcpStatus();
@@ -248,6 +259,17 @@ class ModelConfigPanel {
   static async _stopMcpServer(serverId) {
     processManager.stop(serverId);
     ModelConfigPanel._postMcpStatus();
+  }
+
+  /** @param {string} sessionId @param {"global"|"workspace"} scope */
+  static async _deleteSession(sessionId, scope) {
+    await Settings.deleteSession(sessionId, scope);
+    ModelConfigPanel._postData();
+  }
+
+  static async _deleteExpiredSessions() {
+    await Settings.deleteExpiredSessions();
+    ModelConfigPanel._postData();
   }
 
   static _uuid() {
