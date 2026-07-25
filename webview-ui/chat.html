@@ -847,6 +847,7 @@
         var tc = streamingEl.querySelector(".tc");
         tc._rt = (tc._rt || "") + m.text;
         tc.innerHTML = renderMD(tc._rt);
+        tc.scrollTop = tc.scrollHeight;
         scrollToBottom(nearBottom);
       } else if (m.type === "toolCall") {
         hideThinking();
