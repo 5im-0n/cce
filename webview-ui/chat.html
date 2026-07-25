@@ -824,6 +824,7 @@
               addMsg('assistant', msg.content);
             }
           });
+          messagesEl.scrollTop = messagesEl.scrollHeight;
         }
 
       } else if (m.type === "thinkingDelta") {
