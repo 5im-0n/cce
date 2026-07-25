@@ -21,6 +21,7 @@ class ChatViewProvider {
     this._abortController = null;
     this._msgListener = null;
     this._currentSession = null;
+    this._activeModel = Settings.getDefaultModel();
     this._restoreSession();
   }
 
@@ -60,6 +61,7 @@ class ChatViewProvider {
           break;
         case "setModel":
           if (msg.modelId) {
+            this._activeModel = msg.modelId;
             Settings.setDefaultModel(msg.modelId);
             this._postModels();
           }
@@ -99,7 +101,7 @@ class ChatViewProvider {
     this._view.webview.postMessage({
       type: "modelsLoaded",
       models: models.map((m) => ({ id: m.id, name: m.name })),
-      activeModel: Settings.getDefaultModel(),
+      activeModel: this._activeModel,
     });
   }
 
@@ -228,18 +230,13 @@ class ChatViewProvider {
   }
 
   async _handleSendMessage(messageId, text, images) {
-    const modelConfigId = Settings.getDefaultModel();
-    if (!modelConfigId) {
+    const models = Settings.getModels();
+    const modelConfig = models.find((m) => m.id === this._activeModel) || models[0];
+    if (!modelConfig) {
       this._postError(messageId, "No model configured. Click the settings gear to add one.");
       return;
     }
-
-    const models = Settings.getModels();
-    const modelConfig = models.find((m) => m.id === modelConfigId);
-    if (!modelConfig) {
-      this._postError(messageId, "Selected model not found.");
-      return;
-    }
+    this._activeModel = modelConfig.id;
 
     const apiKey = await Settings.getApiKey(modelConfig.id);
     const provider = getProvider(modelConfig.provider);
