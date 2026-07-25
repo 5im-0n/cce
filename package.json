@@ -2,7 +2,7 @@
   "name": "cce",
   "displayName": "CCE - Code Chat Extension",
   "description": "AI-powered chatbot for code assistance with multi-model support",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "5im-on",
   "license": "MIT",
   "repository": {

@@ -1,8 +1,11 @@
 const vscode = require("vscode");
 
 /**
- * Persistent config backed by VSCode globalState (model definitions)
+ * Persistent config backed by VSCode globalState (model definitions, tools, etc.)
  * and secrets (API keys stored in OS keychain).
+ *
+ * Sessions are stored per-workspace when a workspace/folder is open;
+ * otherwise they fall back to globalState (single-file mode).
  */
 
 /** @type {vscode.ExtensionContext} */
@@ -24,6 +27,19 @@ const API_KEY_PREFIX = "cce.apiKey.";
  */
 function init(context) {
   _ctx = context;
+}
+
+/**
+ * Returns workspaceState when a workspace/folder is open, globalState
+ * otherwise.  Used for session storage so each workspace gets its own
+ * sessions while single-file windows still persist.
+ * @returns {vscode.Memento}
+ */
+function _getMemento() {
+  if (_ctx && vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+    return _ctx.workspaceState;
+  }
+  return _ctx.globalState;
 }
 
 /**
@@ -155,28 +171,28 @@ async function setAgentsMdPath(v) {
  * @returns {Session[]}
  */
 function getSessions() {
-  return _ctx.globalState.get(SESSIONS_KEY, []);
+  return _getMemento().get(SESSIONS_KEY, []);
 }
 
 /**
  * @param {Session[]} sessions
  */
 async function setSessions(sessions) {
-  await _ctx.globalState.update(SESSIONS_KEY, sessions);
+  await _getMemento().update(SESSIONS_KEY, sessions);
 }
 
 /**
  * @returns {string}
  */
 function getCurrentSessionId() {
-  return _ctx.globalState.get(CURRENT_SESSION_KEY, "");
+  return _getMemento().get(CURRENT_SESSION_KEY, "");
 }
 
 /**
  * @param {string} id
  */
 async function setCurrentSessionId(id) {
-  await _ctx.globalState.update(CURRENT_SESSION_KEY, id);
+  await _getMemento().update(CURRENT_SESSION_KEY, id);
 }
 
 /**
