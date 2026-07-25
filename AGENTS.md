@@ -31,38 +31,6 @@ All model interactions must support streaming (tokens arrive incrementally). The
 ### 4. Context Awareness
 The chatbot can optionally include the current file, selection, or open tabs as context. Context injection is handled by the extension host before sending prompts to the model.
 
-## Project Structure
-
-```
-cce/
-├── AGENTS.md                  # This file
-├── package.json               # Extension manifest & deps
-├── jsconfig.json              # Basic JS config (checkJs, target)
-├── .vscodeignore
-├── src/
-│   ├── extension.js           # activate/deactivate entry point
-│   ├── chat/
-│   │   ├── ChatPanel.js       # Webview panel management
-│   │   └── MessageProtocol.js # Message type constants & helpers
-│   ├── providers/
-│   │   ├── registry.js        # Provider registry
-│   │   ├── openai.js
-│   │   ├── anthropic.js
-│   │   └── ollama.js
-│   ├── context/
-│   │   └── ContextCollector.js # Gather file/selection/tab context
-│   └── config/
-│       └── Settings.js        # VSCode settings reader
-├── webview-ui/                # Plain HTML/CSS/JS chat UI (no framework)
-│   ├── index.html             # Main webview page
-│   ├── styles.css             # Chat styling
-│   ├── chat.js                # Chat UI logic
-│   ├── renderer.js            # Message rendering helpers
-│   └── protocol.js            # Message protocol constants
-└── test/
-    └── ...
-```
-
 ## The Provider Contract
 
 Every model provider is a plain object following this contract (documented with JSDoc in the code):
