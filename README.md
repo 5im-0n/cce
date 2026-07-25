@@ -2,6 +2,8 @@
 
 A minimal, transparent VSCode chat interface for LLMs. **You decide what gets sent to the model.** No hidden prompts, no magic context — just a clean channel between you and the model, with tools the model can opt into.
 
+![Screenshot](resources/screenshop.png)
+
 ## Philosophy
 
 - **Full control.** Which files, selections, and system prompts reach the model is always your choice. Nothing is injected behind your back.

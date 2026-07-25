@@ -248,7 +248,6 @@ class ChatViewProvider {
     this._ensureSession();
 
     // Build system prompt with context flags and AGENTS.md
-    // Build system prompt with context flags and AGENTS.md
     let systemPrompt = Settings.getSystemPrompt() || "";
 
     // Inject AGENTS.md content if enabled
@@ -623,4 +622,3 @@ function deactivate() {
 }
 
 module.exports = { activate, deactivate };
-
