@@ -563,8 +563,10 @@
       return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < threshold;
     }
 
-    function scrollToBottom() {
-      if (isNearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight;
+    function scrollToBottom(wasNear) {
+      if (wasNear === undefined ? isNearBottom() : wasNear) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
     }
 
     // ── send ──
@@ -594,6 +596,7 @@
       var es = messagesEl.querySelector(".empty-state");
       if (es) es.remove();
 
+      var nearBottom = isNearBottom();
       if (append && streamingEl) {
         streamingEl._rt = (streamingEl._rt || "") + text;
         streamingEl.innerHTML = renderMD(streamingEl._rt);
@@ -627,19 +630,20 @@
         }
         messagesEl.appendChild(el);
       }
-      scrollToBottom();
+      scrollToBottom(nearBottom);
     }
 
     // ── thinking indicator ──
     function showThinking(label) {
       hideThinking();
+      var nearBottom = isNearBottom();
       thinkingEl = document.createElement("div");
       thinkingEl.className = "thinking";
       thinkingEl.innerHTML =
         "<span>" + escH(label) + "</span>" +
         "<span class='dots'><span></span><span></span><span></span></span>";
       messagesEl.appendChild(thinkingEl);
-      scrollToBottom();
+      scrollToBottom(nearBottom);
     }
 
     function hideThinking() {
@@ -839,13 +843,15 @@
           streamingMsgId = m.messageId;
           currentMode = "thinking";
         }
+        var nearBottom = isNearBottom();
         var tc = streamingEl.querySelector(".tc");
         tc._rt = (tc._rt || "") + m.text;
         tc.innerHTML = renderMD(tc._rt);
-        scrollToBottom();
+        scrollToBottom(nearBottom);
       } else if (m.type === "toolCall") {
         hideThinking();
         closeStream();
+        var nearBottom = isNearBottom();
         var tc = document.createElement("details");
         tc.className = "tool-call";
         tc.innerHTML =
@@ -853,11 +859,12 @@
           "<div class='tool-body args'>" + escH(m.args || "") + "</div>" +
           "<div class='tool-body result'>" + escH(m.result || "(no output)") + "</div>";
         messagesEl.appendChild(tc);
-        scrollToBottom();
+        scrollToBottom(nearBottom);
       } else if (m.type === "toolStatus") {
         showThinking(m.text);
       } else if (m.type === "partialResponse") {
         hideThinking();
+        var nearBottom = isNearBottom();
         if (currentMode !== "text") {
           closeStream();
           streamingEl = document.createElement("div");
@@ -868,7 +875,7 @@
         }
         streamingEl._rt = (streamingEl._rt || "") + m.text;
         streamingEl.innerHTML = renderMD(streamingEl._rt);
-        scrollToBottom();
+        scrollToBottom(nearBottom);
       } else if (m.type === "responseComplete") {
         closeStream();
         hideThinking();
