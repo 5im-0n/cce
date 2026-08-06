@@ -19,6 +19,7 @@ const CONTEXT_KEY = "cce.contextFlags";
 const SESSIONS_KEY = "cce.sessions";
 const CURRENT_SESSION_KEY = "cce.currentSessionId";
 const SESSIONS_MAX_AGE_KEY = "cce.sessionsMaxAge";
+const REASONING_EFFORT_KEY = "cce.reasoningEffort";
 const MCP_KEY = "cce.mcpServers";
 const API_KEY_PREFIX = "cce.apiKey.";
 
@@ -272,6 +273,20 @@ async function deleteExpiredSessions() {
  */
 
 /**
+ * @returns {string}
+ */
+function getReasoningEffort() {
+  return _ctx.globalState.get(REASONING_EFFORT_KEY, "medium");
+}
+
+/**
+ * @param {string} effort - "off" | "low" | "medium" | "high"
+ */
+async function setReasoningEffort(effort) {
+  await _ctx.globalState.update(REASONING_EFFORT_KEY, effort);
+}
+
+/**
  * @typedef {Object} McpServer
  * @property {string} id       - Unique config ID
  * @property {string} name     - Display name
@@ -296,5 +311,5 @@ async function setMcpServers(servers) {
   await _ctx.globalState.update(MCP_KEY, servers);
 }
 
-module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getMcpServers, setMcpServers };
+module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers };
 

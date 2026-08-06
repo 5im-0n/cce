@@ -22,6 +22,7 @@ class ChatViewProvider {
     this._msgListener = null;
     this._currentSession = null;
     this._activeModel = Settings.getDefaultModel();
+    this._reasoningEffort = Settings.getReasoningEffort() || "medium";
     this._restoreSession();
   }
 
@@ -87,6 +88,10 @@ class ChatViewProvider {
         case "deleteSession":
           this._deleteSession(msg.sessionId);
           break;
+        case "setReasoningEffort":
+          this._reasoningEffort = msg.effort;
+          Settings.setReasoningEffort(msg.effort);
+          break;
         case "requestSessions":
           this._postSessions();
           break;
@@ -102,6 +107,7 @@ class ChatViewProvider {
       type: "modelsLoaded",
       models: models.map((m) => ({ id: m.id, name: m.name })),
       activeModel: this._activeModel,
+      reasoningEffort: this._reasoningEffort,
     });
   }
 
@@ -317,7 +323,8 @@ class ChatViewProvider {
       (chunk) => { if (this._view) this._view.webview.postMessage({ type: "partialResponse", messageId, text: chunk }); },
       this._abortController.signal,
       tools.length > 0 ? tools : undefined,
-      (thinking) => { if (this._view) this._view.webview.postMessage({ type: "thinkingDelta", messageId, text: thinking }); }
+      (thinking) => { if (this._view) this._view.webview.postMessage({ type: "thinkingDelta", messageId, text: thinking }); },
+      this._reasoningEffort
     );
 
     if (result.toolCalls && result.toolCalls.length > 0) {
@@ -405,7 +412,9 @@ class ChatViewProvider {
             modelConfig.modelId, modelConfig.endpoint, apiKey,
             () => {}, // no streaming for sub-agents
             new AbortController().signal,
-            subTools.length > 0 ? subTools : undefined
+            subTools.length > 0 ? subTools : undefined,
+            undefined, // no thinking callback for sub-agents
+            this._reasoningEffort
           );
 
           // If the model returned tool calls, execute them and loop
@@ -450,7 +459,9 @@ class ChatViewProvider {
           modelConfig.modelId, modelConfig.endpoint, apiKey,
           () => {},
           new AbortController().signal,
-          undefined // no tools available for final summary
+          undefined, // no tools available for final summary
+          undefined, // no thinking callback for sub-agents
+          this._reasoningEffort
         );
         return "Task " + (i + 1) + " result (max rounds reached):\n" + (finalResult.text || "(no output)");
       } catch (e) {

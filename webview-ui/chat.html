@@ -524,6 +524,12 @@
         <select id="modelSelect">
           <option value="">No models</option>
         </select>
+        <select id="reasoningSelect" title="Reasoning effort">
+          <option value="off">Off</option>
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
+        </select>
         <button id="sendBtn" title="Send">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
             <path d="M15.854.146a.5.5 0 0 1 .113.534l-5 14a.5.5 0 0 1-.934.028L7.76 9.24 3.292 6.967a.5.5 0 0 1 .028-.934l14-5a.5.5 0 0 1 .534.113z"/>
@@ -538,6 +544,7 @@
     var textarea = document.getElementById("userInput");
     var sendBtn = document.getElementById("sendBtn");
     var modelSelect = document.getElementById("modelSelect");
+    var reasoningSelect = document.getElementById("reasoningSelect");
     var settingsBtn = document.getElementById("settingsBtn");
     var sessionsBtn = document.getElementById("sessionsBtn");
     var newSessionBtn = document.getElementById("newSessionBtn");
@@ -720,8 +727,9 @@
     }
 
     // ── model dropdown ──
-    function populateModels(models, activeModel) {
+    function populateModels(models, activeModel, reasoningEffort) {
       currentModelId = activeModel;
+      if (reasoningEffort) reasoningSelect.value = reasoningEffort;
       modelSelect.innerHTML = "";
 
       if (!models || models.length === 0) {
@@ -783,6 +791,10 @@
       }
     });
 
+    reasoningSelect.addEventListener("change", function () {
+      vscode.postMessage({ type: "setReasoningEffort", effort: reasoningSelect.value });
+    });
+
     settingsBtn.addEventListener("click", function () {
       vscode.postMessage({ type: "configureModels" });
     });
@@ -804,7 +816,7 @@
       var m = e.data;
 
       if (m.type === "modelsLoaded") {
-        populateModels(m.models, m.activeModel);
+        populateModels(m.models, m.activeModel, m.reasoningEffort);
 
       } else if (m.type === "sessionsLoaded") {
         renderSessions(m.sessions, m.currentSessionId);
