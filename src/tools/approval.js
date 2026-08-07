@@ -6,7 +6,12 @@
  *   - "ask"   → shows an approval card in the chat and waits for the user
  *   - "deny"  → never executes; the model gets a denial result
  *
- * Resolution priority: session override > persisted per-tool mode > default.
+ * Resolution priority:
+ *   - MCP tools (mcp__<serverId>__<toolName>): server-level approval.
+ *     Session server approval > persisted server mode > default (ask).
+ *     Per-tool overrides are ignored — approval is managed globally
+ *     per MCP server.
+ *   - Other tools: session override > persisted per-tool mode > default.
  */
 
 /** How long an approval request waits before being auto-denied. */
@@ -50,14 +55,43 @@ function defaultMode(toolName) {
 }
 
 /**
+ * Extract the MCP server id from an MCP tool name, or null if the tool
+ * is not an MCP tool. Tool names follow the pattern
+ * `mcp__<serverId>__<toolName>`; server ids are UUIDs (no underscores),
+ * so the first segment after `mcp__` is unambiguous.
+ * @param {string} toolName
+ * @returns {string|null}
+ */
+function getMcpServerId(toolName) {
+  if (!toolName.startsWith("mcp__")) return null;
+  const parts = toolName.split("__");
+  if (parts.length < 2 || !parts[1]) return null;
+  return parts[1];
+}
+
+/**
  * Resolve the effective approval mode for a tool call.
+ *
+ * For MCP tools the mode is resolved at the server level, in priority:
+ * session server approval > persisted server mode > default (ask).
+ * Per-tool session approvals and per-tool persisted modes are ignored.
  *
  * @param {string} toolName
  * @param {Set<string>} sessionApprovals - tool names approved for this session
  * @param {Record<string, "auto"|"ask"|"deny">} persistedModes - per-tool overrides
+ * @param {Record<string, "auto"|"ask"|"deny">} serverModes - per-MCP-server overrides
+ * @param {Set<string>} [sessionServerApprovals] - MCP server ids approved for this session
  * @returns {"auto"|"ask"|"deny"}
  */
-function resolveMode(toolName, sessionApprovals, persistedModes) {
+function resolveMode(toolName, sessionApprovals, persistedModes, serverModes, sessionServerApprovals) {
+  const serverId = getMcpServerId(toolName);
+  if (serverId) {
+    // Session approval is scoped to the whole server for MCP tools.
+    if (sessionServerApprovals && sessionServerApprovals.has(serverId)) return "auto";
+    const mode = (serverModes || {})[serverId];
+    if (mode === "auto" || mode === "ask" || mode === "deny") return mode;
+    return defaultMode(toolName); // MCP tools default to "ask"
+  }
   if (sessionApprovals.has(toolName)) return "auto";
   const mode = persistedModes[toolName];
   if (mode === "auto" || mode === "ask" || mode === "deny") return mode;
@@ -82,4 +116,4 @@ function riskLabel(risk) {
   }
 }
 
-module.exports = { APPROVAL_TIMEOUT_MS, classifyTool, defaultMode, resolveMode, riskLabel };
+module.exports = { APPROVAL_TIMEOUT_MS, classifyTool, defaultMode, getMcpServerId, resolveMode, riskLabel };

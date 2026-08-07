@@ -763,22 +763,40 @@
       card.className = "approval-card" + (m.risk === "dangerous" ? " risk-dangerous" : "");
       card.dataset.approvalId = m.approvalId;
 
+      var isMcp = m.toolName.indexOf("mcp__") === 0;
       var note = "";
       if (m.toolName === "agent") {
         note = "<div class='ac-note'>Approving spawns sub-agents that can run any tool without further approval.</div>";
+      } else if (isMcp) {
+        note = "<div class='ac-note'>Approval is per server and applies to all tools this server exposes. \"Allow for this session\" covers every tool on this server until the session changes.</div>";
       }
 
+      // Show a readable label for MCP tools: "<server> · <tool>"
+      var toolDisplay = m.toolName;
+      if (isMcp) {
+        var parts = m.toolName.split("__");
+        var toolPart = parts.length >= 3 ? parts.slice(2).join("__") : m.toolName;
+        toolDisplay = (m.serverLabel || parts[1] || m.toolName) + " \u00b7 " + toolPart;
+      }
+
+      // MCP tools are approved at the server level: "for this session"
+      // covers the whole server, and "always allow" targets the server.
+      var actions = isMcp
+        ? "<button class='ac-allow' data-d='allow'>Allow</button>" +
+          "<button class='ac-session' data-d='allowSession'>Allow for this session</button>" +
+          "<button class='ac-always' data-d='alwaysAllow'>Always allow this server</button>" +
+          "<button class='ac-deny' data-d='deny'>Deny</button>"
+        : "<button class='ac-allow' data-d='allow'>Allow</button>" +
+          "<button class='ac-session' data-d='allowSession'>Allow for this session</button>" +
+          "<button class='ac-always' data-d='alwaysAllow'>Always allow this tool</button>" +
+          "<button class='ac-deny' data-d='deny'>Deny</button>";
+
       card.innerHTML =
-        "<div class='ac-head'><span class='ac-tool'>" + escH(m.toolName) + "</span>" +
+        "<div class='ac-head'><span class='ac-tool'>" + escH(toolDisplay) + "</span>" +
         "<span class='ac-risk'>" + escH(m.riskLabel || "") + "</span></div>" +
         note +
         "<div class='ac-args'>" + escH(m.args || "") + "</div>" +
-        "<div class='ac-actions'>" +
-          "<button class='ac-allow' data-d='allow'>Allow</button>" +
-          "<button class='ac-session' data-d='allowSession'>Allow for this session</button>" +
-          "<button class='ac-always' data-d='alwaysAllow'>Always allow this tool</button>" +
-          "<button class='ac-deny' data-d='deny'>Deny</button>" +
-        "</div>";
+        "<div class='ac-actions'>" + actions + "</div>";
       messagesEl.appendChild(card);
       scrollToBottom(nearBottom);
 

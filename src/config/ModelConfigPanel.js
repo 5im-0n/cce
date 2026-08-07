@@ -86,6 +86,9 @@ class ModelConfigPanel {
         case "setMcpEnabled":
           await ModelConfigPanel._setMcpEnabled(msg.serverId, msg.enabled);
           break;
+        case "setMcpApprovalMode":
+          await Settings.setMcpApprovalMode(msg.serverId, msg.mode);
+          break;
         case "startMcpServer":
           await ModelConfigPanel._startMcpServer(msg.serverId);
           break;
@@ -125,6 +128,7 @@ class ModelConfigPanel {
       systemPrompt: Settings.getSystemPrompt(),
       toolSettings: Settings.getToolSettings(),
       toolApprovalModes: Settings.getToolApprovalModes(),
+      mcpApprovalModes: Settings.getMcpApprovalModes(),
       contextFlags: Settings.getContextFlags(),
       useAgentsMd: Settings.getUseAgentsMd(),
       agentsMdPath: Settings.getAgentsMdPath(),
@@ -201,6 +205,8 @@ class ModelConfigPanel {
     let servers = Settings.getMcpServers();
     servers = servers.filter((s) => s.id !== serverId);
     await Settings.setMcpServers(servers);
+    // Drop any approval mode stored for the removed server
+    await Settings.clearMcpApprovalMode(serverId);
     ModelConfigPanel._postData();
   }
 

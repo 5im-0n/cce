@@ -28,6 +28,8 @@ class ChatViewProvider {
     this._pendingApprovals = new Map();
     // Tool names approved "for this session" (cleared on session change)
     this._sessionApprovals = new Set();
+    // MCP server ids approved "for this session" (server-level scope)
+    this._sessionServerApprovals = new Set();
     this._restoreSession();
   }
 
@@ -197,6 +199,7 @@ class ChatViewProvider {
     // Reject any pending approvals — the user is moving on
     this._rejectAllPendingApprovals("Session changed");
     this._sessionApprovals.clear();
+    this._sessionServerApprovals.clear();
     // Start fresh — session will be persisted only when first message is sent
     this._currentSession = null;
     this._conversation = [];
@@ -214,6 +217,7 @@ class ChatViewProvider {
     // Pending approvals belong to the old session — deny them all
     this._rejectAllPendingApprovals("Session switched");
     this._sessionApprovals.clear();
+    this._sessionServerApprovals.clear();
     const sessions = Settings.getSessions();
     const session = sessions.find((s) => s.id === sessionId);
     if (!session) return;
@@ -609,7 +613,13 @@ class ChatViewProvider {
    * @returns {Promise<{ decision: "allow"|"deny", mode: "auto"|"ask"|"deny", reason?: string }>}
    */
   async _requestApproval(toolName, args) {
-    const mode = approval.resolveMode(toolName, this._sessionApprovals, Settings.getToolApprovalModes());
+    const mode = approval.resolveMode(
+      toolName,
+      this._sessionApprovals,
+      Settings.getToolApprovalModes(),
+      Settings.getMcpApprovalModes(),
+      this._sessionServerApprovals
+    );
 
     if (mode === "auto") {
       return { decision: "allow", mode };
@@ -636,6 +646,14 @@ class ChatViewProvider {
 
       log.appendLine("Approval: requesting approval for " + toolName + " (" + approvalId + ")");
       this._view.webview.postMessage({ type: "toolStatus", text: "Awaiting approval: " + toolName + "\u2026" });
+
+      // Include the server name for MCP tools so the card can show a
+      // readable label and offer server-level actions.
+      const serverId = approval.getMcpServerId(toolName);
+      const server = serverId
+        ? (Settings.getMcpServers().find((s) => s.id === serverId) || null)
+        : null;
+
       this._view.webview.postMessage({
         type: "approvalRequest",
         approvalId,
@@ -643,6 +661,8 @@ class ChatViewProvider {
         args: JSON.stringify(args || {}, null, 2),
         risk,
         riskLabel: approval.riskLabel(risk),
+        serverId: serverId || undefined,
+        serverLabel: server ? server.name : undefined,
       });
     });
   }
@@ -657,21 +677,38 @@ class ChatViewProvider {
     clearTimeout(pending.timer);
     this._pendingApprovals.delete(msg.approvalId);
 
+    const serverId = approval.getMcpServerId(pending.toolName);
+    const isMcp = serverId !== null;
+
     switch (msg.decision) {
       case "allow":
         log.appendLine("Approval: " + pending.toolName + " allowed");
         pending.resolve({ decision: "allow", mode: "ask" });
         break;
       case "allowSession":
-        log.appendLine("Approval: " + pending.toolName + " allowed for session");
-        this._sessionApprovals.add(pending.toolName);
-        pending.resolve({ decision: "allow", mode: "ask" });
+        if (isMcp) {
+          // MCP session approval is server-level: approving one tool
+          // approves every tool this server exposes for the session.
+          log.appendLine("Approval: MCP server " + serverId + " allowed for session");
+          this._sessionServerApprovals.add(serverId);
+          pending.resolve({ decision: "allow", mode: "ask" });
+        } else {
+          log.appendLine("Approval: " + pending.toolName + " allowed for session");
+          this._sessionApprovals.add(pending.toolName);
+          pending.resolve({ decision: "allow", mode: "ask" });
+        }
         break;
       case "alwaysAllow":
-        log.appendLine("Approval: " + pending.toolName + " set to always allow");
-        Settings.setToolApprovalMode(pending.toolName, "auto");
-        this._sessionApprovals.add(pending.toolName);
-        pending.resolve({ decision: "allow", mode: "auto" });
+        if (isMcp) {
+          log.appendLine("Approval: MCP server " + serverId + " set to always allow");
+          Settings.setMcpApprovalMode(serverId, "auto");
+          pending.resolve({ decision: "allow", mode: "auto" });
+        } else {
+          log.appendLine("Approval: " + pending.toolName + " set to always allow");
+          Settings.setToolApprovalMode(pending.toolName, "auto");
+          this._sessionApprovals.add(pending.toolName);
+          pending.resolve({ decision: "allow", mode: "auto" });
+        }
         break;
       case "deny":
       default:

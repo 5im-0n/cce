@@ -103,11 +103,12 @@ Every tool call is gated by an approval policy before it executes:
 
 - **Read-only tools** (Read File, Get Selection, Search Code, List Files, Get Diagnostics) run automatically.
 - **Mutating tools** (Write File, Edit File, Delete File) and **arbitrary tools** (Run Command, Agent, all MCP tools) require your approval.
-- When approval is needed, an **approval card** appears inline in the chat showing the tool name, its arguments, and its risk level, with four choices:
+- When approval is needed, an **approval card** appears inline in the chat showing the tool name, its arguments, and its risk level, with these choices:
   - **Allow** — run this one call
-  - **Allow for this session** — run this tool without asking for the rest of the session
-  - **Always allow this tool** — persist "auto" for this tool (revocable in Settings → Tools)
+  - **Allow for this session** — run this tool without asking for the rest of the session *(not offered for MCP tools)*
+  - **Always allow this tool** — persist "auto" for this tool, revocable in Settings → Tools *(for MCP tools this becomes "Always allow this server")*
   - **Deny** — refuse; the model is told the call was denied and must adapt
+- **MCP approval is server-level.** An Auto / Ask / Deny dropdown on each server card in **Settings → MCP** applies to *every* tool that server exposes. Per-tool and per-session overrides do not apply to MCP tools; a stale per-tool entry is ignored.
 - Approving the **Agent** tool trusts everything its sub-agents do (they run without further prompts).
 - Pending requests are **auto-denied** after 5 minutes, and denied immediately if you cancel the message, switch sessions, or close the chat.
 - Per-tool overrides (Auto / Ask / Deny) are available in **Settings → Tools**, next to each tool toggle.

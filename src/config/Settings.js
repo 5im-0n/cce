@@ -16,6 +16,7 @@ const DEFAULT_MODEL_KEY = "cce.defaultModel";
 const SYSTEM_PROMPT_KEY = "cce.systemPrompt";
 const TOOLS_KEY = "cce.tools";
 const APPROVAL_MODES_KEY = "cce.toolApprovalModes";
+const MCP_APPROVAL_MODES_KEY = "cce.mcpApprovalModes";
 const CONTEXT_KEY = "cce.contextFlags";
 const SESSIONS_KEY = "cce.sessions";
 const CURRENT_SESSION_KEY = "cce.currentSessionId";
@@ -155,6 +156,39 @@ async function setToolApprovalMode(toolName, mode) {
   const modes = getToolApprovalModes();
   modes[toolName] = mode;
   await _ctx.globalState.update(APPROVAL_MODES_KEY, modes);
+}
+
+/**
+ * Per-MCP-server approval mode overrides.
+ * Map of serverId -> "auto" | "ask" | "deny". Missing entries fall back
+ * to "ask" (MCP tools are classified as dangerous). Applies to every
+ * tool exposed by the server; per-tool overrides do not apply to MCP.
+ * @returns {Record<string, "auto"|"ask"|"deny">}
+ */
+function getMcpApprovalModes() {
+  return _ctx.globalState.get(MCP_APPROVAL_MODES_KEY, {});
+}
+
+/**
+ * Set the approval mode override for an MCP server.
+ * @param {string} serverId
+ * @param {"auto"|"ask"|"deny"} mode
+ */
+async function setMcpApprovalMode(serverId, mode) {
+  const modes = getMcpApprovalModes();
+  modes[serverId] = mode;
+  await _ctx.globalState.update(MCP_APPROVAL_MODES_KEY, modes);
+}
+
+/**
+ * Remove any stored approval mode for an MCP server (e.g. on delete).
+ * @param {string} serverId
+ */
+async function clearMcpApprovalMode(serverId) {
+  const modes = getMcpApprovalModes();
+  if (modes[serverId] === undefined) return;
+  delete modes[serverId];
+  await _ctx.globalState.update(MCP_APPROVAL_MODES_KEY, modes);
 }
 
 /**
@@ -333,5 +367,5 @@ async function setMcpServers(servers) {
   await _ctx.globalState.update(MCP_KEY, servers);
 }
 
-module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getToolApprovalModes, setToolApprovalMode, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers };
+module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getToolApprovalModes, setToolApprovalMode, getMcpApprovalModes, setMcpApprovalMode, clearMcpApprovalMode, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers };
 

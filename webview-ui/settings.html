@@ -452,7 +452,7 @@
   <section class="tab-content" id="tab-mcp">
     <h2>MCP Servers</h2>
     <div class="api-key-hint" style="margin-bottom:20px">
-      Configure Model Context Protocol servers. These provide additional tools and resources to the model.
+      Configure Model Context Protocol servers. These provide additional tools and resources to the model. The approval setting on each server applies to <b>all</b> tools that server exposes (Auto runs without asking, Ask prompts in the chat, Deny blocks them entirely).
     </div>
 
     <div id="mcpList"></div>
@@ -841,6 +841,12 @@
         var statusDot = isRunning
           ? '<span class="status-dot running" title="Running"></span>'
           : '<span class="status-dot stopped" title="Stopped"></span>';
+        var approvalMode = (window._lastMcpApprovalModes || {})[s.id] || 'ask';
+        var approvalOptions = ['auto', 'ask', 'deny'].map(function (m) {
+          var sel = approvalMode === m ? ' selected' : '';
+          var label = m === 'auto' ? 'Auto' : (m === 'ask' ? 'Ask' : 'Deny');
+          return '<option value="' + m + '"' + sel + '>' + label + '</option>';
+        }).join('');
         var startStopBtn = isStdio
           ? (isRunning
               ? '<button class="stop-btn" data-id="' + esc(s.id) + '" title="Stop Process">\u25A0</button>'
@@ -853,6 +859,9 @@
           '</div>' +
           '<div class="card-actions">' +
             startStopBtn +
+            '<select class="approval-select mcp-approval-select" data-id="' + esc(s.id) + '" title="Approval mode for all tools this server exposes">' +
+              approvalOptions +
+            '</select>' +
             '<label class="toggle" style="display:inline-flex;vertical-align:middle;margin-right:4px">' +
               '<input type="checkbox" class="mcp-toggle" data-id="' + esc(s.id) + '"' + checked + '>' +
               '<span class="slider"></span>' +
@@ -898,6 +907,16 @@
             type: 'setMcpEnabled',
             serverId: cb.dataset.id,
             enabled: cb.checked
+          });
+        });
+      });
+
+      mcpListEl.querySelectorAll('.mcp-approval-select').forEach(function(sel) {
+        sel.addEventListener('change', function() {
+          vscode.postMessage({
+            type: 'setMcpApprovalMode',
+            serverId: sel.dataset.id,
+            mode: sel.value
           });
         });
       });
@@ -1020,6 +1039,7 @@
       var msg = e.data;
       if (msg.type === 'dataLoaded') {
         window._lastMcpServers = msg.mcpServers || [];
+        window._lastMcpApprovalModes = msg.mcpApprovalModes || {};
         renderModelList(msg.models);
         systemPromptEl.value = msg.systemPrompt || '';
         renderContextFlags(msg.contextFlags || {});
