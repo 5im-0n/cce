@@ -97,6 +97,21 @@ Enable only the tools you want the model to have access to:
 
 All tools are disabled by default. Enable only what you need.
 
+### Tool Approval
+
+Every tool call is gated by an approval policy before it executes:
+
+- **Read-only tools** (Read File, Get Selection, Search Code, List Files, Get Diagnostics) run automatically.
+- **Mutating tools** (Write File, Edit File, Delete File) and **arbitrary tools** (Run Command, Agent, all MCP tools) require your approval.
+- When approval is needed, an **approval card** appears inline in the chat showing the tool name, its arguments, and its risk level, with four choices:
+  - **Allow** — run this one call
+  - **Allow for this session** — run this tool without asking for the rest of the session
+  - **Always allow this tool** — persist "auto" for this tool (revocable in Settings → Tools)
+  - **Deny** — refuse; the model is told the call was denied and must adapt
+- Approving the **Agent** tool trusts everything its sub-agents do (they run without further prompts).
+- Pending requests are **auto-denied** after 5 minutes, and denied immediately if you cancel the message, switch sessions, or close the chat.
+- Per-tool overrides (Auto / Ask / Deny) are available in **Settings → Tools**, next to each tool toggle.
+
 ### MCP Servers
 
 Add Model Context Protocol servers via **Settings → MCP**. Each server needs a **URL** and optional custom **headers**. Toggle servers on/off per-session.
@@ -113,6 +128,7 @@ Add Model Context Protocol servers via **Settings → MCP**. Each server needs a
 - API keys stored in OS keychain via `vscode.SecretStorage` — never in plaintext files
 - Webview never sees API keys
 - `run_command` and `delete_files` are available but disabled by default — enable them explicitly in Settings → Tools
+- Mutating, shell, and MCP tools require inline user approval before executing (see **Tool Approval** above)
 - Sub-agents are blocked from spawning more sub-agents (no recursive agent explosion)
 
 ## License

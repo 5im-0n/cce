@@ -62,6 +62,9 @@ class ModelConfigPanel {
         case "setToolEnabled":
           await Settings.setToolEnabled(msg.toolName, msg.enabled);
           break;
+        case "setToolApprovalMode":
+          await Settings.setToolApprovalMode(msg.toolName, msg.mode);
+          break;
         case "setContextFlag":
           await Settings.setContextFlag(msg.flag, msg.enabled);
           break;
@@ -121,6 +124,7 @@ class ModelConfigPanel {
       models: Settings.getModels(),
       systemPrompt: Settings.getSystemPrompt(),
       toolSettings: Settings.getToolSettings(),
+      toolApprovalModes: Settings.getToolApprovalModes(),
       contextFlags: Settings.getContextFlags(),
       useAgentsMd: Settings.getUseAgentsMd(),
       agentsMdPath: Settings.getAgentsMdPath(),

@@ -7,6 +7,7 @@ const ModelConfigPanel = require("./config/ModelConfigPanel");
 const { getProvider } = require("./providers/registry");
 const { getEnabledDefinitions } = require("./tools/definitions");
 const { executeToolCall } = require("./tools/executor");
+const approval = require("./tools/approval");
 const { fetchMcpTools, callMcpTool } = require("./mcp/client");
 const processManager = require("./mcp/processManager");
 
@@ -23,6 +24,10 @@ class ChatViewProvider {
     this._currentSession = null;
     this._activeModel = Settings.getDefaultModel();
     this._reasoningEffort = Settings.getReasoningEffort() || "medium";
+    // approvalId -> { resolve, timer, toolName } for pending approval requests
+    this._pendingApprovals = new Map();
+    // Tool names approved "for this session" (cleared on session change)
+    this._sessionApprovals = new Set();
     this._restoreSession();
   }
 
@@ -94,6 +99,9 @@ class ChatViewProvider {
           break;
         case "requestSessions":
           this._postSessions();
+          break;
+        case "approvalResponse":
+          this._handleApprovalResponse(msg);
           break;
       }
     });
@@ -186,6 +194,9 @@ class ChatViewProvider {
   _newSession() {
     // Save current session first if it has content
     this._saveSession();
+    // Reject any pending approvals — the user is moving on
+    this._rejectAllPendingApprovals("Session changed");
+    this._sessionApprovals.clear();
     // Start fresh — session will be persisted only when first message is sent
     this._currentSession = null;
     this._conversation = [];
@@ -200,6 +211,9 @@ class ChatViewProvider {
   _switchSession(sessionId) {
     // Save current session before switching away
     this._saveSession();
+    // Pending approvals belong to the old session — deny them all
+    this._rejectAllPendingApprovals("Session switched");
+    this._sessionApprovals.clear();
     const sessions = Settings.getSessions();
     const session = sessions.find((s) => s.id === sessionId);
     if (!session) return;
@@ -253,6 +267,17 @@ class ChatViewProvider {
     this._conversation.push({ role: "user", content: text, images: images || [] });
     this._ensureSession();
 
+    // Gather enabled tools
+    let tools = getEnabledDefinitions(Settings.getToolSettings());
+
+    // Fetch MCP tools (both HTTP and stdio)
+    try {
+      const mcpTools = await fetchMcpTools();
+      tools = tools.concat(mcpTools);
+    } catch (e) {
+      log.appendLine("MCP fetch FAILED: " + (e.stack || e.message));
+    }
+
     // Build system prompt with context flags and AGENTS.md
     let systemPrompt = Settings.getSystemPrompt() || "";
 
@@ -289,18 +314,14 @@ class ChatViewProvider {
       systemPrompt = "<!-- Context -->\n" + contextParts.join("\n") + "\n\n" + systemPrompt;
     }
 
-    const messages = this._convertToChatMessages(systemPrompt);
-    // Gather enabled tools
-    let tools = getEnabledDefinitions(Settings.getToolSettings());
-
-    // Fetch MCP tools (both HTTP and stdio)
-    try {
-      const mcpTools = await fetchMcpTools();
-      tools = tools.concat(mcpTools);
-    } catch (e) {
-      log.appendLine("MCP fetch FAILED: " + (e.stack || e.message));
+    // Tools may require user approval before executing
+    if (tools.length > 0) {
+      systemPrompt +=
+        "\n\nImportant: Some tool calls require user approval. If a tool call is denied or returns an approval error, " +
+        "do not retry the same tool call. Adapt your answer based on the information you already have.";
     }
 
+    const messages = this._convertToChatMessages(systemPrompt);
     log.appendLine("Sending " + tools.length + " total tools to model");
     this._abortController = new AbortController();
 
@@ -330,23 +351,40 @@ class ChatViewProvider {
     if (result.toolCalls && result.toolCalls.length > 0) {
       messages.push({ role: "assistant", content: null, tool_calls: result.toolCalls });
       for (const tc of result.toolCalls) {
-        if (this._view) this._view.webview.postMessage({ type: "toolStatus", text: "Running " + tc.function.name + "\u2026" });
         let toolResult, toolArgs;
         try {
           toolArgs = JSON.parse(tc.function.arguments || "{}");
+        } catch (e) {
+          toolResult = "Error: invalid tool arguments: " + e.message;
+          toolArgs = {};
+        }
 
-          // Route MCP tools to the MCP client
-          if (tc.function.name.startsWith("mcp__")) {
-            const parts = tc.function.name.split("__");
-            const serverId = parts[1];
-            const toolName = parts.slice(2).join("__");
-            toolResult = await callMcpTool(serverId, toolName, toolArgs);
-          } else if (tc.function.name === "agent") {
-            toolResult = await this._runAgent(toolArgs, modelConfig, apiKey, provider);
-          } else {
-            toolResult = await executeToolCall(tc.function.name, toolArgs);
+        // Approval gate — no tool executes without passing the policy check
+        const decision = await this._requestApproval(tc.function.name, toolArgs);
+        if (decision.decision !== "allow") {
+          toolResult =
+            "Error: user denied approval for tool `" + tc.function.name + "`" +
+            (decision.reason ? " (" + decision.reason + ")" : "") +
+            ". Do not retry this tool call — adapt your answer without it.";
+        } else {
+          if (this._view) this._view.webview.postMessage({ type: "toolStatus", text: "Running " + tc.function.name + "\u2026" });
+          try {
+            // Route MCP tools to the MCP client
+            if (tc.function.name.startsWith("mcp__")) {
+              const parts = tc.function.name.split("__");
+              const serverId = parts[1];
+              const toolName = parts.slice(2).join("__");
+              toolResult = await callMcpTool(serverId, toolName, toolArgs);
+            } else if (tc.function.name === "agent") {
+              // Approving the agent call trusts everything its sub-agents do
+              toolResult = await this._runAgent(toolArgs, modelConfig, apiKey, provider);
+            } else {
+              toolResult = await executeToolCall(tc.function.name, toolArgs);
+            }
+          } catch (e) {
+            toolResult = "Error: " + e.message;
           }
-        } catch (e) { toolResult = "Error: " + e.message; toolArgs = {}; }
+        }
 
         // Show tool details in chat
         if (this._view) {
@@ -552,11 +590,113 @@ class ChatViewProvider {
       this._abortController.abort();
       this._abortController = null;
     }
+    // Any tool calls waiting on approval belong to the cancelled request
+    this._rejectAllPendingApprovals("Request cancelled");
+  }
+
+  // ── tool approval gate ──
+
+  /**
+   * Gate a tool call behind user approval. Resolves to a decision object:
+   *   { decision: "allow", mode }  → run the tool
+   *   { decision: "deny", mode, reason } → do not run it
+   *
+   * Auto-approved when the resolved policy is "auto"; denied immediately
+   * when it is "deny", when no webview is available, or on timeout.
+   *
+   * @param {string} toolName
+   * @param {object} args
+   * @returns {Promise<{ decision: "allow"|"deny", mode: "auto"|"ask"|"deny", reason?: string }>}
+   */
+  async _requestApproval(toolName, args) {
+    const mode = approval.resolveMode(toolName, this._sessionApprovals, Settings.getToolApprovalModes());
+
+    if (mode === "auto") {
+      return { decision: "allow", mode };
+    }
+    if (mode === "deny") {
+      log.appendLine("Approval: " + toolName + " denied by policy");
+      return { decision: "deny", mode, reason: "Denied by approval policy" };
+    }
+    if (!this._view) {
+      log.appendLine("Approval: no chat view, auto-denying " + toolName);
+      return { decision: "deny", mode, reason: "Chat view is not available" };
+    }
+
+    return new Promise((resolve) => {
+      const approvalId = "apr-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+      const risk = approval.classifyTool(toolName);
+      const timer = setTimeout(() => {
+        log.appendLine("Approval: " + approvalId + " (" + toolName + ") timed out");
+        this._pendingApprovals.delete(approvalId);
+        resolve({ decision: "deny", mode, reason: "Approval request timed out" });
+      }, approval.APPROVAL_TIMEOUT_MS);
+
+      this._pendingApprovals.set(approvalId, { resolve, timer, toolName });
+
+      log.appendLine("Approval: requesting approval for " + toolName + " (" + approvalId + ")");
+      this._view.webview.postMessage({ type: "toolStatus", text: "Awaiting approval: " + toolName + "\u2026" });
+      this._view.webview.postMessage({
+        type: "approvalRequest",
+        approvalId,
+        toolName,
+        args: JSON.stringify(args || {}, null, 2),
+        risk,
+        riskLabel: approval.riskLabel(risk),
+      });
+    });
+  }
+
+  /**
+   * Handle an approval response from the webview.
+   * @param {{ approvalId: string, decision: "allow"|"allowSession"|"alwaysAllow"|"deny" }} msg
+   */
+  _handleApprovalResponse(msg) {
+    const pending = this._pendingApprovals.get(msg.approvalId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this._pendingApprovals.delete(msg.approvalId);
+
+    switch (msg.decision) {
+      case "allow":
+        log.appendLine("Approval: " + pending.toolName + " allowed");
+        pending.resolve({ decision: "allow", mode: "ask" });
+        break;
+      case "allowSession":
+        log.appendLine("Approval: " + pending.toolName + " allowed for session");
+        this._sessionApprovals.add(pending.toolName);
+        pending.resolve({ decision: "allow", mode: "ask" });
+        break;
+      case "alwaysAllow":
+        log.appendLine("Approval: " + pending.toolName + " set to always allow");
+        Settings.setToolApprovalMode(pending.toolName, "auto");
+        this._sessionApprovals.add(pending.toolName);
+        pending.resolve({ decision: "allow", mode: "auto" });
+        break;
+      case "deny":
+      default:
+        log.appendLine("Approval: " + pending.toolName + " denied");
+        pending.resolve({ decision: "deny", mode: "ask", reason: "Denied by user" });
+        break;
+    }
+  }
+
+  /**
+   * Deny every pending approval request (e.g. on cancel or session change).
+   * @param {string} reason
+   */
+  _rejectAllPendingApprovals(reason) {
+    for (const [, pending] of this._pendingApprovals) {
+      clearTimeout(pending.timer);
+      pending.resolve({ decision: "deny", mode: "ask", reason });
+    }
+    this._pendingApprovals.clear();
   }
 
   // ── clean up ──
 
   dispose() {
+    this._rejectAllPendingApprovals("Extension disposed");
     if (this._msgListener) this._msgListener.dispose();
   }
 }

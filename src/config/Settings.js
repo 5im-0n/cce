@@ -15,6 +15,7 @@ const MODELS_KEY = "cce.models";
 const DEFAULT_MODEL_KEY = "cce.defaultModel";
 const SYSTEM_PROMPT_KEY = "cce.systemPrompt";
 const TOOLS_KEY = "cce.tools";
+const APPROVAL_MODES_KEY = "cce.toolApprovalModes";
 const CONTEXT_KEY = "cce.contextFlags";
 const SESSIONS_KEY = "cce.sessions";
 const CURRENT_SESSION_KEY = "cce.currentSessionId";
@@ -133,6 +134,27 @@ async function setToolEnabled(toolName, enabled) {
   const tools = getToolSettings();
   tools[toolName] = enabled;
   await _ctx.globalState.update(TOOLS_KEY, tools);
+}
+
+/**
+ * Per-tool approval mode overrides.
+ * Map of toolName -> "auto" | "ask" | "deny". Missing entries fall back
+ * to the default derived from the tool's risk classification.
+ * @returns {Record<string, "auto"|"ask"|"deny">}
+ */
+function getToolApprovalModes() {
+  return _ctx.globalState.get(APPROVAL_MODES_KEY, {});
+}
+
+/**
+ * Set or clear the approval mode override for a tool.
+ * @param {string} toolName
+ * @param {"auto"|"ask"|"deny"} mode
+ */
+async function setToolApprovalMode(toolName, mode) {
+  const modes = getToolApprovalModes();
+  modes[toolName] = mode;
+  await _ctx.globalState.update(APPROVAL_MODES_KEY, modes);
 }
 
 /**
@@ -311,5 +333,5 @@ async function setMcpServers(servers) {
   await _ctx.globalState.update(MCP_KEY, servers);
 }
 
-module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers };
+module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getToolApprovalModes, setToolApprovalMode, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers };
 

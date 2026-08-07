@@ -467,6 +467,103 @@
     }
     .tool-call .tool-body.args { color: var(--vscode-descriptionForeground); }
     .tool-call .tool-body.result { color: var(--vscode-foreground); }
+
+    /* ── approval cards ── */
+    .approval-card {
+      margin: 0 24px 12px;
+      border: 1px solid var(--vscode-inputValidation-warningBorder, #cca700);
+      border-radius: 6px;
+      overflow: hidden;
+      font-size: 12px;
+      background: var(--vscode-textBlockQuote-background);
+    }
+    .approval-card.risk-dangerous {
+      border-color: var(--vscode-inputValidation-errorBorder, #f14c4c);
+      border-width: 1.5px;
+    }
+    .approval-card .ac-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      background: var(--vscode-textBlockQuote-background);
+    }
+    .approval-card .ac-tool {
+      font-weight: 600;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 12px;
+      color: var(--vscode-symbolIcon-functionForeground);
+    }
+    .approval-card .ac-risk {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--vscode-inputValidation-warningForeground, #cca700);
+    }
+    .approval-card.risk-dangerous .ac-risk {
+      color: var(--vscode-inputValidation-errorForeground, #f14c4c);
+    }
+    .approval-card .ac-note {
+      padding: 4px 10px;
+      font-size: 11px;
+      font-style: italic;
+      color: var(--vscode-descriptionForeground);
+    }
+    .approval-card .ac-args {
+      padding: 6px 10px;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 11px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 200px;
+      overflow-y: auto;
+      color: var(--vscode-descriptionForeground);
+      border-top: 1px solid var(--vscode-sideBarSectionHeader-border);
+    }
+    .approval-card .ac-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 8px 10px;
+      border-top: 1px solid var(--vscode-sideBarSectionHeader-border);
+    }
+    .approval-card .ac-actions button {
+      border: 1px solid transparent;
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-family: var(--vscode-font-family);
+      cursor: pointer;
+    }
+    .approval-card .ac-allow {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+    .approval-card .ac-allow:hover {
+      background: var(--vscode-button-hoverBackground);
+    }
+    .approval-card .ac-session {
+      background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+      color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+    }
+    .approval-card .ac-always {
+      background: transparent;
+      color: var(--vscode-foreground);
+      border-color: var(--vscode-input-border) !important;
+    }
+    .approval-card .ac-deny {
+      background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
+      color: var(--vscode-inputValidation-errorForeground, #f14c4c);
+    }
+    .approval-card .ac-state {
+      padding: 4px 10px;
+      font-size: 11px;
+      font-style: italic;
+      border-top: 1px solid var(--vscode-sideBarSectionHeader-border);
+    }
+    .approval-card .ac-state.denied { color: var(--vscode-inputValidation-errorForeground, #f14c4c); }
+    .approval-card .ac-state.approved { color: var(--vscode-charts-green, #89d185); }
+    .approval-card .ac-actions:empty { display: none; }
   </style>
 </head>
 <body>
@@ -655,6 +752,63 @@
 
     function hideThinking() {
       if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+    }
+
+    // ── approval cards ──
+    function renderApprovalRequest(m) {
+      hideThinking();
+      closeStream();
+      var nearBottom = isNearBottom();
+      var card = document.createElement("div");
+      card.className = "approval-card" + (m.risk === "dangerous" ? " risk-dangerous" : "");
+      card.dataset.approvalId = m.approvalId;
+
+      var note = "";
+      if (m.toolName === "agent") {
+        note = "<div class='ac-note'>Approving spawns sub-agents that can run any tool without further approval.</div>";
+      }
+
+      card.innerHTML =
+        "<div class='ac-head'><span class='ac-tool'>" + escH(m.toolName) + "</span>" +
+        "<span class='ac-risk'>" + escH(m.riskLabel || "") + "</span></div>" +
+        note +
+        "<div class='ac-args'>" + escH(m.args || "") + "</div>" +
+        "<div class='ac-actions'>" +
+          "<button class='ac-allow' data-d='allow'>Allow</button>" +
+          "<button class='ac-session' data-d='allowSession'>Allow for this session</button>" +
+          "<button class='ac-always' data-d='alwaysAllow'>Always allow this tool</button>" +
+          "<button class='ac-deny' data-d='deny'>Deny</button>" +
+        "</div>";
+      messagesEl.appendChild(card);
+      scrollToBottom(nearBottom);
+
+      card.querySelectorAll(".ac-actions button").forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          if (card.classList.contains("resolved")) return;
+          card.classList.add("resolved");
+          vscode.postMessage({ type: "approvalResponse", approvalId: m.approvalId, decision: btn.dataset.d });
+          var actions = card.querySelector(".ac-actions");
+          actions.innerHTML = "";
+          var state = document.createElement("div");
+          state.className = "ac-state " + (btn.dataset.d === "deny" ? "denied" : "approved");
+          state.textContent = btn.dataset.d === "deny" ? "Denied" : "Approved \u2014 running\u2026";
+          card.appendChild(state);
+        });
+      });
+    }
+
+    // Mark any still-pending approval cards as cancelled (e.g. user hit Stop,
+    // the request timed out, or the request errored). Buttons are disabled.
+    function cancelPendingApprovalCards() {
+      messagesEl.querySelectorAll(".approval-card:not(.resolved)").forEach(function(card) {
+        card.classList.add("resolved");
+        var actions = card.querySelector(".ac-actions");
+        if (actions) actions.innerHTML = "";
+        var state = document.createElement("div");
+        state.className = "ac-state denied";
+        state.textContent = "Cancelled";
+        card.appendChild(state);
+      });
     }
 
     // ── markdown renderer (uses marked library) ──
@@ -875,6 +1029,8 @@
         scrollToBottom(nearBottom);
       } else if (m.type === "toolStatus") {
         showThinking(m.text);
+      } else if (m.type === "approvalRequest") {
+        renderApprovalRequest(m);
       } else if (m.type === "partialResponse") {
         hideThinking();
         var nearBottom = isNearBottom();
@@ -892,10 +1048,12 @@
       } else if (m.type === "responseComplete") {
         closeStream();
         hideThinking();
+        cancelPendingApprovalCards();
         setBusy(false);
       } else if (m.type === "error") {
         closeStream();
         hideThinking();
+        cancelPendingApprovalCards();
         setBusy(false);
         addMsg("error", "Error: " + m.error);
       } else if (m.type === "imagesAttached") {

@@ -262,6 +262,37 @@
       font-size: 11px;
       color: var(--vscode-descriptionForeground);
     }
+    .risk-tag {
+      font-size: 9px;
+      font-weight: 400;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--vscode-descriptionForeground);
+      border: 1px solid var(--vscode-sideBarSectionHeader-border);
+      border-radius: 3px;
+      padding: 1px 4px;
+      margin-left: 4px;
+      vertical-align: middle;
+    }
+    .risk-tag.risk-modify {
+      color: var(--vscode-inputValidation-warningForeground, #cca700);
+      border-color: var(--vscode-inputValidation-warningBorder, #cca700);
+    }
+    .risk-tag.risk-dangerous {
+      color: var(--vscode-inputValidation-errorForeground, #f14c4c);
+      border-color: var(--vscode-inputValidation-errorBorder, #f14c4c);
+    }
+    .approval-select {
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border);
+      font-family: var(--vscode-font-family);
+      font-size: 11px;
+      padding: 2px 4px;
+      border-radius: 4px;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
     .toggle {
       position: relative;
       display: inline-block;
@@ -408,8 +439,11 @@
   <!-- ── Tools tab ── -->
   <section class="tab-content" id="tab-tools">
     <h2>Tools</h2>
-    <div class="api-key-hint" style="margin-bottom:20px">
+    <div class="api-key-hint" style="margin-bottom:8px">
       Enable or disable tools the model can use to interact with your workspace.
+    </div>
+    <div class="api-key-hint" style="margin-bottom:20px">
+      Approval: <b>Ask</b> prompts you in the chat before each call, <b>Auto</b> runs without asking, <b>Deny</b> blocks the tool entirely. Read-only tools default to Auto; everything else defaults to Ask.
     </div>
     <div id="toolToggles"></div>
   </section>
@@ -661,26 +695,41 @@
     var toolTogglesEl = document.getElementById('toolToggles');
 
     var TOOL_DEFS = [
-      { name: 'read_file', label: 'Read File', desc: 'Read contents of workspace files.' },
-      { name: 'get_selection', label: 'Get Selection', desc: 'Get the current editor selection and cursor position.' },
-      { name: 'search_code', label: 'Search Code', desc: 'Search workspace with ripgrep for patterns.' },
-      { name: 'list_files', label: 'List Files', desc: 'List files and directories in the workspace.' },
-      { name: 'get_diagnostics', label: 'Get Diagnostics', desc: 'Read VSCode errors, warnings, and hints.' },
-      { name: 'write_file', label: 'Write File', desc: 'Create a new file or completely overwrite an existing file.' },
-      { name: 'edit_file', label: 'Edit File', desc: 'Make targeted edits by finding exact text and replacing it.' },
-      { name: 'delete_files', label: 'Delete File', desc: 'Delete a file or directory from the workspace. Use with caution.' },
-      { name: 'run_command', label: 'Run Command', desc: 'Execute shell commands. Use with caution.' },
-      { name: 'agent', label: 'Sub-Agents', desc: 'Spawn parallel sub-agents to work on multiple independent tasks simultaneously.' }
+      { name: 'read_file', label: 'Read File', desc: 'Read contents of workspace files.', risk: 'read' },
+      { name: 'get_selection', label: 'Get Selection', desc: 'Get the current editor selection and cursor position.', risk: 'read' },
+      { name: 'search_code', label: 'Search Code', desc: 'Search workspace with ripgrep for patterns.', risk: 'read' },
+      { name: 'list_files', label: 'List Files', desc: 'List files and directories in the workspace.', risk: 'read' },
+      { name: 'get_diagnostics', label: 'Get Diagnostics', desc: 'Read VSCode errors, warnings, and hints.', risk: 'read' },
+      { name: 'write_file', label: 'Write File', desc: 'Create a new file or completely overwrite an existing file.', risk: 'modify' },
+      { name: 'edit_file', label: 'Edit File', desc: 'Make targeted edits by finding exact text and replacing it.', risk: 'modify' },
+      { name: 'delete_files', label: 'Delete File', desc: 'Delete a file or directory from the workspace. Use with caution.', risk: 'modify' },
+      { name: 'run_command', label: 'Run Command', desc: 'Execute shell commands. Use with caution.', risk: 'dangerous' },
+      { name: 'agent', label: 'Sub-Agents', desc: 'Spawn parallel sub-agents to work on multiple independent tasks simultaneously.', risk: 'dangerous' }
     ];
 
-    function renderToolToggles(toolSettings) {
+    var RISK_LABELS = { read: 'Read-only', modify: 'Modifies files', dangerous: 'Arbitrary execution' };
+    var DEFAULT_MODES = { read: 'auto', modify: 'ask', dangerous: 'ask' };
+
+    function renderToolToggles(toolSettings, approvalModes) {
       toolTogglesEl.innerHTML = TOOL_DEFS.map(function (t) {
         var checked = toolSettings[t.name] !== false ? ' checked' : '';
+        var mode = (approvalModes && approvalModes[t.name]) || DEFAULT_MODES[t.risk];
+        var riskClass = t.risk === 'dangerous' ? 'risk-dangerous' : (t.risk === 'modify' ? 'risk-modify' : '');
+        var options = ['auto', 'ask', 'deny'].map(function (m) {
+          var sel = mode === m ? ' selected' : '';
+          var label = m === 'auto' ? 'Auto' : (m === 'ask' ? 'Ask' : 'Deny');
+          return '<option value="' + m + '"' + sel + '>' + label + '</option>';
+        }).join('');
         return '<div class="tool-item">' +
           '<div class="tool-info">' +
-            '<div class="tool-name">' + esc(t.label) + '</div>' +
+            '<div class="tool-name">' + esc(t.label) +
+              ' <span class="risk-tag ' + riskClass + '">' + esc(RISK_LABELS[t.risk]) + '</span>' +
+            '</div>' +
             '<div class="tool-desc">' + esc(t.desc) + '</div>' +
           '</div>' +
+          '<select class="approval-select" data-tool="' + esc(t.name) + '" title="Approval mode">' +
+            options +
+          '</select>' +
           '<label class="toggle">' +
             '<input type="checkbox" data-tool="' + esc(t.name) + '"' + checked + '>' +
             '<span class="slider"></span>' +
@@ -694,6 +743,16 @@
             type: 'setToolEnabled',
             toolName: cb.dataset.tool,
             enabled: cb.checked
+          });
+        });
+      });
+
+      toolTogglesEl.querySelectorAll('select.approval-select').forEach(function (sel) {
+        sel.addEventListener('change', function () {
+          vscode.postMessage({
+            type: 'setToolApprovalMode',
+            toolName: sel.dataset.tool,
+            mode: sel.value
           });
         });
       });
@@ -966,7 +1025,7 @@
         renderContextFlags(msg.contextFlags || {});
         useAgentsMdToggle.checked = msg.useAgentsMd !== false;
         agentsMdPathEl.value = msg.agentsMdPath || 'AGENTS.md';
-        renderToolToggles(msg.toolSettings || {});
+        renderToolToggles(msg.toolSettings || {}, msg.toolApprovalModes || {});
         renderMcpList(msg.mcpServers || []);
         renderSessionList(msg.sessions || []);
         sessionsMaxAgeEl.value = msg.sessionsMaxAge || 0;
