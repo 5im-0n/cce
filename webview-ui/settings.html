@@ -705,7 +705,7 @@
       { name: 'edit_file', label: 'Edit File', desc: 'Make targeted edits by finding exact text and replacing it.', risk: 'modify' },
       { name: 'delete_files', label: 'Delete File', desc: 'Delete a file or directory from the workspace. Use with caution.', risk: 'modify' },
       { name: 'run_command', label: 'Run Command', desc: 'Execute shell commands. Use with caution.', risk: 'dangerous' },
-      { name: 'agent', label: 'Sub-Agents', desc: 'Spawn parallel sub-agents to work on multiple independent tasks simultaneously.', risk: 'dangerous' }
+      { name: 'agent', label: 'Sub-Agents (experimental)', desc: 'Spawn parallel sub-agents to work on multiple independent tasks simultaneously. Off by default — enable only if you understand the approval implications.', risk: 'dangerous', offByDefault: true }
     ];
 
     var RISK_LABELS = { read: 'Read-only', modify: 'Modifies files', dangerous: 'Arbitrary execution' };
@@ -713,7 +713,7 @@
 
     function renderToolToggles(toolSettings, approvalModes) {
       toolTogglesEl.innerHTML = TOOL_DEFS.map(function (t) {
-        var checked = toolSettings[t.name] !== false ? ' checked' : '';
+        var checked = t.offByDefault ? (toolSettings[t.name] === true ? ' checked' : '') : (toolSettings[t.name] !== false ? ' checked' : '');
         var mode = (approvalModes && approvalModes[t.name]) || DEFAULT_MODES[t.risk];
         var riskClass = t.risk === 'dangerous' ? 'risk-dangerous' : (t.risk === 'modify' ? 'risk-modify' : '');
         var options = ['auto', 'ask', 'deny'].map(function (m) {

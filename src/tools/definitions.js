@@ -235,9 +235,12 @@ const TOOL_DEFINITIONS = [
  * @returns {Array<object>}
  */
 function getEnabledDefinitions(enabledTools) {
-  return TOOL_DEFINITIONS.filter(
-    (t) => enabledTools[t.function.name] !== false
-  );
+  return TOOL_DEFINITIONS.filter((t) => {
+    const name = t.function.name;
+    // Agent tool is off by default (experimental) — requires explicit opt-in
+    if (name === "agent") return enabledTools[name] === true;
+    return enabledTools[name] !== false;
+  });
 }
 
 module.exports = { getEnabledDefinitions };
