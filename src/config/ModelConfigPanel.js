@@ -62,6 +62,9 @@ class ModelConfigPanel {
         case "deleteModel":
           await ModelConfigPanel._deleteModel(msg.configId);
           break;
+        case "moveModel":
+          await ModelConfigPanel._moveModel(msg.configId, msg.direction);
+          break;
         case "saveSystemPrompt":
           await Settings.setSystemPrompt(msg.prompt);
           break;
@@ -207,6 +210,25 @@ class ModelConfigPanel {
     if (Settings.getDefaultModel() === configId) {
       await Settings.setDefaultModel(models.length > 0 ? models[0].id : "");
     }
+    ModelConfigPanel._postData();
+    if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
+  }
+
+  /**
+   * Reorder a model in the list. Order is the source of truth for the
+   * settings list and the chat dropdown, so both follow automatically.
+   * @param {string} configId
+   * @param {"up" | "down"} direction
+   */
+  static async _moveModel(configId, direction) {
+    const models = Settings.getModels();
+    const idx = models.findIndex((m) => m.id === configId);
+    if (idx === -1) return;
+    const target = direction === "up" ? idx - 1 : idx + 1;
+    if (target < 0 || target >= models.length) return;
+    const [moved] = models.splice(idx, 1);
+    models.splice(target, 0, moved);
+    await Settings.setModels(models);
     ModelConfigPanel._postData();
     if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
   }

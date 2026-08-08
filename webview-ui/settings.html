@@ -160,6 +160,8 @@
       border-radius: 4px;
     }
     .card-actions button:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
+    .card-actions button:disabled { opacity: 0.2; cursor: default; }
+    .card-actions button:disabled:hover { opacity: 0.2; background: none; }
     .empty-hint {
       font-size: 12px;
       color: var(--vscode-descriptionForeground);
@@ -582,13 +584,21 @@
         modelListEl.innerHTML = '<div class="empty-hint">No models configured yet.</div>';
         return;
       }
-      modelListEl.innerHTML = models.map(function (m) {
+      modelListEl.innerHTML = models.map(function (m, i) {
+        var upDisabled = i === 0 ? ' disabled' : '';
+        var downDisabled = i === models.length - 1 ? ' disabled' : '';
         return '<div class="model-card">' +
           '<div class="info">' +
             '<div class="name">' + esc(m.name) + '</div>' +
             '<div class="detail">' + esc(m.provider) + ' \u2014 ' + esc(m.modelId) + ' \u2014 ' + esc(m.endpoint) + '</div>' +
           '</div>' +
           '<div class="card-actions">' +
+            '<button class="move-up-btn" data-id="' + esc(m.id) + '" title="Move up"' + upDisabled + '>' +
+              '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M4 10.5 L8 6.5 L12 10.5 L10.5 11.5 L8 9.25 L5.5 11.5 Z" clip-rule="evenodd"/></svg>' +
+            '</button>' +
+            '<button class="move-down-btn" data-id="' + esc(m.id) + '" title="Move down"' + downDisabled + '>' +
+              '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M4 6 L8 10 L12 6 L10.5 4.5 L8 6.75 L5.5 4.5 Z" clip-rule="evenodd"/></svg>' +
+            '</button>' +
             '<button class="edit-btn" data-id="' + esc(m.id) + '" title="Edit">' +
               '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25a1.75 1.75 0 0 1 .445-.758l8.61-8.61zm1.414 1.06a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354l-1.086-1.086zM11.189 6.25L9.75 4.81l-6.286 6.287a.25.25 0 0 0-.064.108l-.558 1.953 1.953-.558a.25.25 0 0 0 .108-.064l6.286-6.286z" clip-rule="evenodd"/></svg>' +
             '</button>' +
@@ -612,6 +622,18 @@
           var id = btn.dataset.id;
           if (editingId === id) setAddingMode();
           vscode.postMessage({ type: 'deleteModel', configId: id });
+        });
+      });
+
+      modelListEl.querySelectorAll('.move-up-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          vscode.postMessage({ type: 'moveModel', configId: btn.dataset.id, direction: 'up' });
+        });
+      });
+
+      modelListEl.querySelectorAll('.move-down-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          vscode.postMessage({ type: 'moveModel', configId: btn.dataset.id, direction: 'down' });
         });
       });
     }
