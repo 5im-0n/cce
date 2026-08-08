@@ -1,11 +1,44 @@
 const log = require("../config/log").get();
 
 /**
+ * @typedef {Object} ToolCall
+ * @property {string} id
+ * @property {Object} function
+ * @property {string} function.name
+ * @property {string} function.arguments
+ */
+
+/**
+ * @typedef {Object} ContentPart
+ * @property {"text" | "image_url"} [type]
+ * @property {string} [text]
+ * @property {{ url?: string }} [image_url]
+ */
+
+/**
  * @typedef {Object} ChatMessage
- * @property {"system" | "user" | "assistant" | "tool"} role
- * @property {string} [content]
- * @property {Array<object>} [tool_calls]
+ * @property {string} role
+ * @property {string | Array<ContentPart> | null} [content]
+ * @property {Array<ToolCall>} [tool_calls]
  * @property {string} [tool_call_id]
+ */
+
+/**
+ * @typedef {Object} ToolDefinition
+ * @property {"function"} type
+ * @property {Object} function
+ * @property {string} function.name
+ * @property {string} function.description
+ * @property {object} function.parameters
+ * @property {string} [_mcpServerId]
+ * @property {string} [_mcpToolName]
+ */
+
+/**
+ * @typedef {Object} ChatResult
+ * @property {string} text
+ * @property {string} [thinking]
+ * @property {Array<ToolCall>} [toolCalls]
  */
 
 /**
@@ -27,10 +60,10 @@ const openaiProvider = {
    * @param {string} apiKey
    * @param {function(string): void} onPartial - Called with each text token chunk
    * @param {AbortSignal} [signal]
-   * @param {Array<object>} [tools] - OpenAI tool definitions
+   * @param {Array<ToolDefinition>} [tools] - OpenAI tool definitions
    * @param {function(string): void} [onThinking] - Called with reasoning/thinking tokens
    * @param {string} [reasoningEffort] - "off" | "low" | "medium" | "high" (GPT-5.6+)
-   * @returns {Promise<{ text: string, thinking?: string, toolCalls?: Array }>}
+   * @returns {Promise<ChatResult>}
    */
   async chat(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, reasoningEffort) {
     const hasReasoning = reasoningEffort && reasoningEffort !== "off";
@@ -48,11 +81,20 @@ const openaiProvider = {
 
   /**
    * Send via /v1/chat/completions (existing behaviour, unchanged).
+   * @param {ChatMessage[]} messages
+   * @param {string} modelId
+   * @param {string} endpoint
+   * @param {string} apiKey
+   * @param {function(string): void} onPartial
+   * @param {AbortSignal} [signal]
+   * @param {Array<ToolDefinition>} [tools]
+   * @param {function(string): void} [onThinking]
+   * @returns {Promise<ChatResult>}
    */
   async _chatCompletions(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking) {
     const url = endpoint.replace(/\/+$/, "") + "/chat/completions";
 
-    /** @type {object} */
+    /** @type {Record<string, any>} */
     const body = {
       model: modelId,
       messages,
@@ -63,6 +105,7 @@ const openaiProvider = {
       body.tools = tools;
     }
 
+    /** @type {Record<string, string>} */
     const headers = { "Content-Type": "application/json" };
     if (apiKey) {
       headers.Authorization = `Bearer ${apiKey}`;
@@ -85,6 +128,10 @@ const openaiProvider = {
         response.status,
         errText
       );
+    }
+
+    if (!response.body) {
+      throw new ProviderError("Empty response body from API", response.status);
     }
 
     let fullText = "";
@@ -131,10 +178,11 @@ const openaiProvider = {
           if (delta?.tool_calls) {
             for (const tc of delta.tool_calls) {
               const idx = tc.index ?? 0;
-              if (!toolCalls.has(idx)) {
-                toolCalls.set(idx, { id: "", name: "", arguments: "" });
+              let entry = toolCalls.get(idx);
+              if (!entry) {
+                entry = { id: "", name: "", arguments: "" };
+                toolCalls.set(idx, entry);
               }
-              const entry = toolCalls.get(idx);
               if (tc.id) entry.id = tc.id;
               if (tc.function?.name) entry.name += tc.function.name;
               if (tc.function?.arguments) entry.arguments += tc.function.arguments;
@@ -168,6 +216,7 @@ const openaiProvider = {
       }
     }
 
+    /** @type {ChatResult} */
     const result = fullText
       ? { text: fullText }
       : { text: "" };
@@ -195,6 +244,16 @@ const openaiProvider = {
   /**
    * Send via /v1/responses (GPT-5.6+ reasoning models).
    * The Responses API supports reasoning + tools together natively.
+   * @param {ChatMessage[]} messages
+   * @param {string} modelId
+   * @param {string} endpoint
+   * @param {string} apiKey
+   * @param {function(string): void} onPartial
+   * @param {AbortSignal} [signal]
+   * @param {Array<ToolDefinition>} [tools]
+   * @param {function(string): void} [onThinking]
+   * @param {string} [reasoningEffort]
+   * @returns {Promise<ChatResult>}
    */
   async _chatResponses(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, reasoningEffort) {
     const url = endpoint.replace(/\/+$/, "") + "/responses";
@@ -208,7 +267,7 @@ const openaiProvider = {
 
     for (const msg of messages) {
       if (msg.role === "system") {
-        instructions += (instructions ? "\n" : "") + (msg.content || "");
+        instructions += (instructions ? "\n" : "") + String(msg.content || "");
         continue;
       }
 
@@ -253,15 +312,15 @@ const openaiProvider = {
     if (tools && tools.length > 0) {
       responseTools = tools.map((t) => ({
         type: "function",
-        name: t.function?.name || t.name || "",
-        description: t.function?.description || t.description || "",
-        parameters: t.function?.parameters || t.parameters || {},
+        name: t.function.name,
+        description: t.function.description,
+        parameters: t.function.parameters,
       }));
     }
 
     // ── Build request ────────────────────
 
-    /** @type {object} */
+    /** @type {Record<string, any>} */
     const body = {
       model: modelId,
       input,
@@ -280,6 +339,7 @@ const openaiProvider = {
       body.tools = responseTools;
     }
 
+    /** @type {Record<string, string>} */
     const headers = { "Content-Type": "application/json" };
     if (apiKey) {
       headers.Authorization = `Bearer ${apiKey}`;
@@ -304,6 +364,10 @@ const openaiProvider = {
         response.status,
         errText
       );
+    }
+
+    if (!response.body) {
+      throw new ProviderError("Empty response body from API", response.status);
     }
 
     // ── Parse SSE stream ────────────────
@@ -440,6 +504,7 @@ const openaiProvider = {
 
     // ── Build result ────────────────────
 
+    /** @type {ChatResult} */
     const result = fullText
       ? { text: fullText }
       : { text: "" };
@@ -452,7 +517,7 @@ const openaiProvider = {
 
     if (functionCalls.length > 0) {
       result.toolCalls = functionCalls.map((item) => ({
-        id: item.call_id,
+        id: item.call_id || "",
         type: "function",
         function: {
           name: item.name || "",

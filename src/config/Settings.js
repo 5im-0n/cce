@@ -275,12 +275,16 @@ async function setSessionsMaxAge(age) {
  * @returns {Array<Session & { scope: "global" | "workspace" }>}
  */
 function getAllSessions() {
-  const globalSessions = (_ctx.globalState.get(SESSIONS_KEY, []) || []).map((s) => ({ ...s, scope: "global" }));
+  /** @type {Session[]} */
+  const globalRaw = _ctx.globalState.get(SESSIONS_KEY, []) || [];
+  const globalSessions = globalRaw.map((s) => /** @type {Session & { scope: "global" }} */ ({ ...s, scope: "global" }));
   const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0;
   if (!hasWorkspace) {
     return globalSessions;
   }
-  const workspaceSessions = (_ctx.workspaceState.get(SESSIONS_KEY, []) || []).map((s) => ({ ...s, scope: "workspace" }));
+  /** @type {Session[]} */
+  const workspaceRaw = _ctx.workspaceState.get(SESSIONS_KEY, []) || [];
+  const workspaceSessions = workspaceRaw.map((s) => /** @type {Session & { scope: "workspace" }} */ ({ ...s, scope: "workspace" }));
   // Merge: workspace sessions first (most relevant), then global
   return [...workspaceSessions, ...globalSessions];
 }
@@ -292,6 +296,7 @@ function getAllSessions() {
  */
 async function deleteSession(sessionId, scope) {
   const storage = scope === "workspace" ? _ctx.workspaceState : _ctx.globalState;
+  /** @type {Session[]} */
   let sessions = storage.get(SESSIONS_KEY, []) || [];
   sessions = sessions.filter((s) => s.id !== sessionId);
   await storage.update(SESSIONS_KEY, sessions);
@@ -306,6 +311,7 @@ async function deleteExpiredSessions() {
   const cutoff = Date.now() - maxAge * 86400000;
 
   // Global sessions
+  /** @type {Session[]} */
   let globalSessions = _ctx.globalState.get(SESSIONS_KEY, []) || [];
   globalSessions = globalSessions.filter((s) => new Date(s.updatedAt).getTime() >= cutoff);
   await _ctx.globalState.update(SESSIONS_KEY, globalSessions);
@@ -313,6 +319,7 @@ async function deleteExpiredSessions() {
   // Workspace sessions (if a workspace is open)
   const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0;
   if (hasWorkspace) {
+    /** @type {Session[]} */
     let wsSessions = _ctx.workspaceState.get(SESSIONS_KEY, []) || [];
     wsSessions = wsSessions.filter((s) => new Date(s.updatedAt).getTime() >= cutoff);
     await _ctx.workspaceState.update(SESSIONS_KEY, wsSessions);
@@ -325,7 +332,7 @@ async function deleteExpiredSessions() {
  * @property {string} title
  * @property {string} createdAt
  * @property {string} updatedAt
- * @property {Array<{role:string,content:string}>} messages
+ * @property {Array<{ role: string, content: string | null }>} messages
  */
 
 /**

@@ -8,7 +8,31 @@ const processManager = require("./processManager");
  */
 
 /**
- * @returns {Promise<Array<object>>}
+ * @typedef {Object} McpToolInfo
+ * @property {string} name
+ * @property {string} [description]
+ * @property {object} [inputSchema]
+ */
+
+/**
+ * @typedef {Object} McpRpcResult
+ * @property {Array<McpToolInfo>} [tools]
+ * @property {Array<{ type: string, text?: string }>} [content]
+ */
+
+/**
+ * @typedef {Object} McpToolDefinition
+ * @property {"function"} type
+ * @property {Object} function
+ * @property {string} function.name
+ * @property {string} function.description
+ * @property {object} function.parameters
+ * @property {string} _mcpServerId
+ * @property {string} _mcpToolName
+ */
+
+/**
+ * @returns {Promise<Array<McpToolDefinition>>}
  */
 async function fetchMcpTools() {
   const servers = Settings.getMcpServers().filter((s) => s.enabled !== false);
@@ -17,26 +41,29 @@ async function fetchMcpTools() {
   const allTools = [];
   for (const server of servers) {
     try {
+      /** @type {McpRpcResult} */
       let result;
       if (_isStdio(server)) {
         result = await processManager.sendRequest(server.id, "tools/list", {});
       } else {
         result = await _httpRpcCall(server, "tools/list", {});
       }
-      const tools = (result.tools || []).map((t) => ({
-        type: "function",
-        function: {
-          name: "mcp__" + server.id + "__" + t.name,
-          description: t.description || "",
-          parameters: t.inputSchema || { type: "object", properties: {} },
-        },
-        _mcpServerId: server.id,
-        _mcpToolName: t.name,
-      }));
+      const tools = (result.tools || []).map((t) =>
+        /** @type {McpToolDefinition} */ ({
+          type: "function",
+          function: {
+            name: "mcp__" + server.id + "__" + t.name,
+            description: t.description || "",
+            parameters: t.inputSchema || { type: "object", properties: {} },
+          },
+          _mcpServerId: server.id,
+          _mcpToolName: t.name,
+        })
+      );
       allTools.push(...tools);
     } catch (e) {
       // Re-throw with server name for logging in extension.js
-      throw new Error(server.name + ": " + e.message);
+      throw new Error(server.name + ": " + (e instanceof Error ? e.message : String(e)));
     }
   }
   return allTools;
@@ -67,11 +94,12 @@ async function callMcpTool(serverId, toolName, args) {
       });
     }
   } catch (e) {
-    return "MCP error: " + e.message;
+    return "MCP error: " + (e instanceof Error ? e.message : String(e));
   }
 
-  const content = result.content || [];
-  return content
+  /** @type {McpRpcResult} */
+  const content = result || {};
+  return (content.content || [])
     .map((c) => (c.type === "text" ? c.text : JSON.stringify(c)))
     .join("\n") || "(no output)";
 }
@@ -87,12 +115,16 @@ function _isStdio(server) {
 
 /**
  * JSON-RPC call over HTTP POST.
- * @param {{ url: string, headers?: Record<string, string> }} server
+ * @param {{ url?: string, headers?: Record<string, string> }} server
  * @param {string} method
  * @param {object} params
- * @returns {Promise<object>}
+ * @returns {Promise<any>} - JSON-RPC result payload (shape depends on the method)
  */
 async function _httpRpcCall(server, method, params) {
+  if (!server.url) {
+    throw new Error("MCP server has no URL configured");
+  }
+
   const headers = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",

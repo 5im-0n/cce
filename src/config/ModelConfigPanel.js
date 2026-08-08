@@ -11,6 +11,12 @@ const log = require("./log").get;
  * Opens as a modal-like editor tab.
  */
 class ModelConfigPanel {
+  /** @type {vscode.WebviewPanel | null} */
+  static _panel = null;
+
+  /** @type {(() => void) | null} */
+  static _onChanged = null;
+
   /**
    * Create the panel if not already open, or reveal it.
    * @param {vscode.ExtensionContext} context
@@ -143,6 +149,7 @@ class ModelConfigPanel {
   static _postMcpStatus() {
     if (!ModelConfigPanel._panel) return;
     const running = processManager.getRunningIds();
+    /** @type {Record<string, { running: boolean }>} */
     const statuses = {};
     for (const id of running) {
       statuses[id] = { running: true };
@@ -159,7 +166,9 @@ class ModelConfigPanel {
     });
   }
 
-  /** @param {Omit<import('./Settings').ModelConfig, 'id'>} config */
+  /**
+   * @param {Omit<import('./Settings').ModelConfig, 'id'> & { apiKey?: string }} config
+   */
   static async _addModel(config) {
     const models = Settings.getModels();
     const newModel = { id: ModelConfigPanel._uuid(), ...config };
@@ -171,7 +180,10 @@ class ModelConfigPanel {
     if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
   }
 
-  /** @param {string} configId @param {Partial<import('./Settings').ModelConfig>} config */
+  /**
+   * @param {string} configId
+   * @param {Partial<import('./Settings').ModelConfig> & { apiKey?: string }} config
+   */
   static async _updateModel(configId, config) {
     const models = Settings.getModels();
     const idx = models.findIndex((m) => m.id === configId);
@@ -199,6 +211,9 @@ class ModelConfigPanel {
     if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
   }
 
+  /**
+   * @param {string} serverId
+   */
   static async _deleteMcp(serverId) {
     // Stop the process if running
     processManager.stop(serverId);
@@ -210,9 +225,12 @@ class ModelConfigPanel {
     ModelConfigPanel._postData();
   }
 
+  /**
+   * @param {import('./Settings').McpServer} server
+   */
   static async _addMcp(server) {
     const servers = Settings.getMcpServers();
-    const newServer = { id: ModelConfigPanel._uuid(), ...server };
+    const newServer = { ...server, id: ModelConfigPanel._uuid() };
     servers.push(newServer);
     await Settings.setMcpServers(servers);
     // Auto-start if it's a stdio server and enabled
@@ -222,6 +240,10 @@ class ModelConfigPanel {
     ModelConfigPanel._postData();
   }
 
+  /**
+   * @param {string} serverId
+   * @param {import('./Settings').McpServer} server
+   */
   static async _updateMcp(serverId, server) {
     // Stop existing process if running
     processManager.stop(serverId);
@@ -237,6 +259,10 @@ class ModelConfigPanel {
     ModelConfigPanel._postData();
   }
 
+  /**
+   * @param {string} serverId
+   * @param {boolean} enabled
+   */
   static async _setMcpEnabled(serverId, enabled) {
     const servers = Settings.getMcpServers();
     const idx = servers.findIndex((s) => s.id === serverId);
@@ -254,6 +280,9 @@ class ModelConfigPanel {
     ModelConfigPanel._postData();
   }
 
+  /**
+   * @param {string} serverId
+   */
   static async _startMcpServer(serverId) {
     const servers = Settings.getMcpServers();
     const server = servers.find((s) => s.id === serverId);
@@ -266,6 +295,9 @@ class ModelConfigPanel {
     ModelConfigPanel._postMcpStatus();
   }
 
+  /**
+   * @param {string} serverId
+   */
   static async _stopMcpServer(serverId) {
     processManager.stop(serverId);
     ModelConfigPanel._postMcpStatus();
@@ -285,11 +317,9 @@ class ModelConfigPanel {
   static _uuid() {
     return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
       const r = (Math.random() * 16) | 0;
-      return c === "x" ? r : (r & 0x3) | 0x8;
+      return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
     });
   }
-
 }
 
 module.exports = ModelConfigPanel;
-

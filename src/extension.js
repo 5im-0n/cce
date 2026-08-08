@@ -14,14 +14,31 @@ const { fetchMcpTools, callMcpTool } = require("./mcp/client");
 const processManager = require("./mcp/processManager");
 
 /**
+ * @typedef {Object} ConversationMessage
+ * @property {string} role
+ * @property {string | null} content
+ * @property {Array<{ id: string, name: string, dataUrl: string, size: number, warning: boolean }>} [images]
+ * @property {Array<{ id: string, type: string, function: { name: string, arguments: string } }>} [tool_calls]
+ * @property {string} [tool_call_id]
+ */
+
+/**
  * @implements {vscode.WebviewViewProvider}
  */
 class ChatViewProvider {
+  /**
+   * @param {vscode.ExtensionContext} context
+   */
   constructor(context) {
+    /** @type {vscode.ExtensionContext} */
     this._context = context;
+    /** @type {vscode.WebviewView | null} */
     this._view = null;
+    /** @type {Array<ConversationMessage>} */
     this._conversation = [];
+    /** @type {AbortController | null} */
     this._abortController = null;
+    /** @type {vscode.Disposable | null} */
     this._msgListener = null;
     this._currentSession = null;
     this._activeModel = Settings.getDefaultModel();
@@ -35,12 +52,14 @@ class ChatViewProvider {
     this._restoreSession();
   }
 
+  /**
+   * @param {vscode.WebviewView} webviewView
+   */
   resolveWebviewView(webviewView) {
     log.appendLine("resolveWebviewView called");
     this._view = webviewView;
     webviewView.webview.options = {
       enableScripts: true,
-      retainContextWhenHidden: true,
     };
     const htmlPath = path.join(this._context.extensionPath, "webview-ui", "chat.html");
     const markedPath = path.join(this._context.extensionPath, "webview-ui", "marked.js");
@@ -66,7 +85,7 @@ class ChatViewProvider {
               this._postModels();
             });
           } catch (err) {
-            vscode.window.showErrorMessage("CCE: " + err.message);
+            vscode.window.showErrorMessage("CCE: " + (err instanceof Error ? err.message : String(err)));
           }
           break;
         case "setModel":
@@ -139,8 +158,8 @@ class ChatViewProvider {
   _ensureSession() {
     if (!this._currentSession) {
       const id = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-        let r = (Math.random() * 16) | 0;
-        return c === "x" ? r : (r & 0x3) | 0x8;
+        const r = (Math.random() * 16) | 0;
+        return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
       });
       this._currentSession = id;
       Settings.setCurrentSessionId(id);
@@ -152,11 +171,12 @@ class ChatViewProvider {
     if (!this._conversation || this._conversation.length === 0) return;
 
     this._ensureSession();
+    const sessionId = /** @type {string} */ (this._currentSession);
 
     let sessions = Settings.getSessions();
     // Clean out any other empty sessions
     sessions = sessions.filter((s) => s.messages && s.messages.length > 0);
-    let session = sessions.find((s) => s.id === this._currentSession);
+    let session = sessions.find((s) => s.id === sessionId);
 
     if (session) {
       session.messages = this._conversation;
@@ -165,15 +185,15 @@ class ChatViewProvider {
       if (session.title && session.title.startsWith("Chat ")) {
         const firstUser = this._conversation.find((m) => m.role === "user");
         if (firstUser) {
-          session.title = firstUser.content.slice(0, 50).replace(/\n/g, " ");
+          session.title = (firstUser.content || "").slice(0, 50).replace(/\n/g, " ");
         }
       }
     } else {
       const now = new Date().toISOString();
       const firstUser = this._conversation.find((m) => m.role === "user");
-      const title = firstUser ? firstUser.content.slice(0, 50).replace(/\n/g, " ") : "Chat";
+      const title = firstUser ? (firstUser.content || "").slice(0, 50).replace(/\n/g, " ") : "Chat";
       sessions.push({
-        id: this._currentSession,
+        id: sessionId,
         title,
         createdAt: now,
         updatedAt: now,
@@ -213,6 +233,9 @@ class ChatViewProvider {
     }
   }
 
+  /**
+   * @param {string} sessionId
+   */
   _switchSession(sessionId) {
     // Save current session before switching away
     this._saveSession();
@@ -232,6 +255,9 @@ class ChatViewProvider {
     }
   }
 
+  /**
+   * @param {string} sessionId
+   */
   _deleteSession(sessionId) {
     let sessions = Settings.getSessions();
     sessions = sessions.filter((s) => s.id !== sessionId);
@@ -251,10 +277,20 @@ class ChatViewProvider {
 
   // ── messaging ──
 
+  /**
+   * @param {string} messageId
+   * @param {string} error
+   */
   _postError(messageId, error) {
     if (this._view) this._view.webview.postMessage({ type: "error", messageId, error });
   }
 
+  /**
+   * @param {string} messageId
+   * @param {string} text
+   * @param {Array<{ id: string, name: string, dataUrl: string, size: number, warning: boolean }>} [images]
+   * @returns {Promise<void>}
+   */
   async _handleSendMessage(messageId, text, images) {
     const models = Settings.getModels();
     const modelConfig = models.find((m) => m.id === this._activeModel) || models[0];
@@ -264,7 +300,7 @@ class ChatViewProvider {
     }
     this._activeModel = modelConfig.id;
 
-    const apiKey = await Settings.getApiKey(modelConfig.id);
+    const apiKey = (await Settings.getApiKey(modelConfig.id)) || "";
     const provider = getProvider(modelConfig.provider);
     if (!provider) {
       this._postError(messageId, "Unknown provider: " + modelConfig.provider);
@@ -281,7 +317,7 @@ class ChatViewProvider {
       const mcpTools = await fetchMcpTools();
       tools = tools.concat(mcpTools);
     } catch (e) {
-      log.appendLine("MCP fetch FAILED: " + (e.stack || e.message));
+      log.appendLine("MCP fetch FAILED: " + (e instanceof Error ? (e.stack || e.message) : String(e)));
     }
 
     // Build system prompt with context flags and AGENTS.md
@@ -299,7 +335,7 @@ class ChatViewProvider {
           }
         }
       } catch (e) {
-        log.appendLine("Failed to read AGENTS.md: " + e.message);
+        log.appendLine("Failed to read AGENTS.md: " + (e instanceof Error ? e.message : String(e)));
       }
     }
 
@@ -336,21 +372,31 @@ class ChatViewProvider {
     try {
       await this._chatLoop(messageId, messages, modelConfig, apiKey, provider, tools);
     } catch (err) {
-      if (err.name === "AbortError") {
+      if (err instanceof Error && err.name === "AbortError") {
         if (this._view) this._view.webview.postMessage({ type: "responseComplete", messageId });
         return;
       }
-      this._postError(messageId, err.message || "Unknown error");
+      this._postError(messageId, err instanceof Error ? err.message : String(err));
     } finally {
       this._abortController = null;
     }
   }
 
+  /**
+   * @param {string} messageId
+   * @param {Array<import("./providers/openai").ChatMessage>} messages
+   * @param {import("./config/Settings").ModelConfig} modelConfig
+   * @param {string} apiKey
+   * @param {import("./providers/registry").Provider} provider
+   * @param {Array<import("./tools/definitions").ToolDefinition>} tools
+   * @returns {Promise<void>}
+   */
   async _chatLoop(messageId, messages, modelConfig, apiKey, provider, tools) {
+    const signal = this._abortController ? this._abortController.signal : undefined;
     const result = await provider.chat(
       messages, modelConfig.modelId, modelConfig.endpoint, apiKey,
       (chunk) => { if (this._view) this._view.webview.postMessage({ type: "partialResponse", messageId, text: chunk }); },
-      this._abortController.signal,
+      signal,
       tools.length > 0 ? tools : undefined,
       (thinking) => { if (this._view) this._view.webview.postMessage({ type: "thinkingDelta", messageId, text: thinking }); },
       this._reasoningEffort
@@ -363,7 +409,7 @@ class ChatViewProvider {
         try {
           toolArgs = JSON.parse(tc.function.arguments || "{}");
         } catch (e) {
-          toolResult = "Error: invalid tool arguments: " + e.message;
+          toolResult = "Error: invalid tool arguments: " + (e instanceof Error ? e.message : String(e));
           toolArgs = {};
         }
 
@@ -390,7 +436,7 @@ class ChatViewProvider {
               toolResult = await executeToolCall(tc.function.name, toolArgs);
             }
           } catch (e) {
-            toolResult = "Error: " + e.message;
+            toolResult = "Error: " + (e instanceof Error ? e.message : String(e));
           }
         }
 
@@ -426,6 +472,14 @@ class ChatViewProvider {
     if (this._view) this._view.webview.postMessage({ type: "responseComplete", messageId });
   }
 
+  /**
+   * Run parallel sub-agents, each with a task and access to tools (except `agent`).
+   * @param {{ tasks?: Array<string> }} args
+   * @param {import("./config/Settings").ModelConfig} modelConfig
+   * @param {string} apiKey
+   * @param {import("./providers/registry").Provider} provider
+   * @returns {Promise<string>}
+   */
   async _runAgent(args, modelConfig, apiKey, provider) {
     const tasks = args.tasks || [];
     if (!tasks.length) return "No tasks provided.";
@@ -439,7 +493,7 @@ class ChatViewProvider {
       const mcpTools = await fetchMcpTools();
       subTools = subTools.concat(mcpTools.filter(t => t.function.name !== "agent"));
     } catch (e) {
-      log.appendLine("Agent: MCP fetch failed: " + (e.stack || e.message));
+      log.appendLine("Agent: MCP fetch failed: " + (e instanceof Error ? (e.stack || e.message) : String(e)));
     }
 
     log.appendLine("Agent: spawning " + tasks.length + " sub-agents with " + subTools.length + " tools");
@@ -448,6 +502,7 @@ class ChatViewProvider {
 
     const results = await Promise.all(tasks.map(async (task, i) => {
       try {
+        /** @type {Array<import("./providers/openai").ChatMessage>} */
         const messages = [{ role: "user", content: String(task) }];
         let round = 0;
 
@@ -483,7 +538,7 @@ class ChatViewProvider {
                   toolResult = await executeToolCall(tc.function.name, toolArgs);
                 }
               } catch (e) {
-                toolResult = "Error: " + e.message;
+                toolResult = "Error: " + (e instanceof Error ? e.message : String(e));
                 toolArgs = {};
               }
 
@@ -511,7 +566,7 @@ class ChatViewProvider {
         );
         return "Task " + (i + 1) + " result (max rounds reached):\n" + (finalResult.text || "(no output)");
       } catch (e) {
-        return "Task " + (i + 1) + " error: " + e.message;
+        return "Task " + (i + 1) + " error: " + (e instanceof Error ? e.message : String(e));
       }
     }));
 
@@ -539,6 +594,9 @@ class ChatViewProvider {
     }
   }
 
+  /**
+   * @param {Array<vscode.Uri>} uris
+   */
   async _validateAndEncodeImages(uris) {
     const images = [];
     const errors = [];
@@ -553,6 +611,7 @@ class ChatViewProvider {
           continue;
         }
         const ext = path.extname(uri.fsPath).toLowerCase().replace(".", "");
+        /** @type {Record<string, string>} */
         const mimeTypes = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
         const mime = mimeTypes[ext] || "image/png";
         const buffer = await fs.promises.readFile(uri.fsPath);
@@ -565,12 +624,18 @@ class ChatViewProvider {
           warning: stat.size > MAX_SOFT,
         });
       } catch (e) {
-        errors.push({ name: path.basename(uri.fsPath), error: e.message });
+        errors.push({ name: path.basename(uri.fsPath), error: e instanceof Error ? e.message : String(e) });
       }
     }
     return { images, errors };
   }
 
+  /**
+   * Convert the in-memory conversation plus system prompt into
+   * OpenAI-style chat messages (including image content parts).
+   * @param {string} systemPrompt
+   * @returns {Array<import("./providers/openai").ChatMessage>}
+   */
   _convertToChatMessages(systemPrompt) {
     const messages = [];
     if (systemPrompt.trim()) {
@@ -578,13 +643,12 @@ class ChatViewProvider {
     }
     for (const m of this._conversation) {
       if (m.images && m.images.length > 0) {
-        messages.push({
-          role: m.role,
-          content: [
-            { type: "text", text: m.content || "" },
-            ...m.images.map(img => ({ type: "image_url", image_url: { url: img.dataUrl } }))
-          ]
-        });
+        /** @type {Array<import("./providers/openai").ContentPart>} */
+        const content = [
+          { type: "text", text: m.content || "" },
+          ...m.images.map((img) => /** @type {import("./providers/openai").ContentPart} */ ({ type: "image_url", image_url: { url: img.dataUrl } })),
+        ];
+        messages.push({ role: m.role, content });
       } else {
         messages.push({ role: m.role, content: m.content });
       }
@@ -635,6 +699,7 @@ class ChatViewProvider {
       log.appendLine("Approval: no chat view, auto-denying " + toolName);
       return { decision: "deny", mode, reason: "Chat view is not available" };
     }
+    const view = this._view;
 
     return new Promise((resolve) => {
       const approvalId = "apr-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
@@ -648,7 +713,7 @@ class ChatViewProvider {
       this._pendingApprovals.set(approvalId, { resolve, timer, toolName });
 
       log.appendLine("Approval: requesting approval for " + toolName + " (" + approvalId + ")");
-      this._view.webview.postMessage({ type: "toolStatus", text: "Awaiting approval: " + toolName + toolStatusSuffix(toolName, args) });
+      view.webview.postMessage({ type: "toolStatus", text: "Awaiting approval: " + toolName + toolStatusSuffix(toolName, args) });
 
       // Include the server name for MCP tools so the card can show a
       // readable label and offer server-level actions.
@@ -657,7 +722,7 @@ class ChatViewProvider {
         ? (Settings.getMcpServers().find((s) => s.id === serverId) || null)
         : null;
 
-      this._view.webview.postMessage({
+      view.webview.postMessage({
         type: "approvalRequest",
         approvalId,
         toolName,
@@ -795,16 +860,20 @@ function _startMcpServers() {
   for (const server of servers) {
     if (server.enabled !== false && server.command) {
       try {
-        processManager.start(server);
+        processManager.start({
+          id: server.id,
+          command: server.command,
+          args: server.args,
+        });
       } catch (e) {
-        log.appendLine("Failed to start MCP server \"" + server.name + "\": " + e.message);
+        log.appendLine("Failed to start MCP server \"" + server.name + "\": " + (e instanceof Error ? e.message : String(e)));
       }
     }
   }
 }
 
 /**
- * @param {vscode.ExtensionContext} context
+ * Clean shutdown: stop MCP server processes.
  */
 function deactivate() {
   log.appendLine("CCE deactivating\u2026");

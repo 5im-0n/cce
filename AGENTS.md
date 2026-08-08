@@ -51,4 +51,5 @@ When the plan is approved, then:
 2. Check if a provider, type, or utility already exists before creating a new one.
 3. Follow the existing message protocol — don't add new message types without keeping the extension host and webview in sync.
 4. Keep the provider interface stable. New optional fields are OK; breaking changes require a migration plan.
-5. Write tests for providers and protocol logic. UI tests are optional.
+5. Write tests for the code you implement. UI tests are optional.
+6. Check the code is valid with `get_diagnostics`.

@@ -6,7 +6,7 @@ const cp = require("child_process");
  * Execute a tool call and return its result as a string.
  *
  * @param {string} toolName
- * @param {object} args
+ * @param {Record<string, any>} args
  * @returns {Promise<string>}
  */
 async function executeToolCall(toolName, args) {
@@ -50,6 +50,8 @@ async function executeToolCall(toolName, args) {
 /**
  * @param {string} root
  * @param {string} filePath
+ * @param {number} [offset] - 1-based line number to start from
+ * @param {number} [limit] - Maximum number of lines to read
  */
 function readFile(root, filePath, offset, limit) {
   const fullPath = path.resolve(root, filePath);
@@ -82,6 +84,9 @@ function readFile(root, filePath, offset, limit) {
 
 /**
  * Create a new file or completely overwrite an existing file.
+ * @param {string} root
+ * @param {string} filePath
+ * @param {string} [content]
  */
 function writeFile(root, filePath, content) {
   const fullPath = path.resolve(root, filePath);
@@ -105,6 +110,10 @@ function writeFile(root, filePath, content) {
 /**
  * Make a targeted edit by finding an exact text match and replacing it.
  * oldText must match exactly and be unique in the file.
+ * @param {string} root
+ * @param {string} filePath
+ * @param {string} oldText
+ * @param {string} newText
  */
 function editFile(root, filePath, oldText, newText) {
   const fullPath = path.resolve(root, filePath);
@@ -148,6 +157,12 @@ function editFile(root, filePath, oldText, newText) {
   return `Edited ${filePath}: replaced ${oldLen} chars with ${newLen} chars (${diffStr}).`;
 }
 
+/**
+ * Delete a file or directory (recursively).
+ * @param {string} root
+ * @param {string} filePath
+ * @param {boolean} [recursive] - Allow deleting non-empty directories
+ */
 function deleteFiles(root, filePath, recursive) {
   const fullPath = path.resolve(root, filePath);
   const fs = require("fs");
@@ -205,6 +220,10 @@ async function searchCode(root, pattern, fileTypes) {
 
 /**
  * Use ripgrep binary (bundled with VSCode) for fast search.
+ * @param {string} root
+ * @param {string} pattern
+ * @param {string} [fileTypes]
+ * @returns {Promise<string>}
  */
 function ripgrepSearch(root, pattern, fileTypes) {
   return new Promise((resolve) => {
@@ -233,7 +252,6 @@ function ripgrepSearch(root, pattern, fileTypes) {
     const proc = cp.spawn(rgPath, args, {
       cwd: root,
       timeout: 10000,
-      maxBuffer: 512 * 1024,
       windowsHide: true,
     });
 
@@ -261,6 +279,9 @@ function ripgrepSearch(root, pattern, fileTypes) {
 
 /**
  * Fallback search using VSCode workspace API.
+ * @param {string} pattern
+ * @param {string} [fileTypes]
+ * @returns {Promise<string>}
  */
 async function vscodeSearch(pattern, fileTypes) {
   const patternStr = fileTypes
@@ -294,6 +315,8 @@ async function vscodeSearch(pattern, fileTypes) {
 
 /**
  * List files in a directory.
+ * @param {string} root
+ * @param {string} [dirPath] - Directory relative to root; defaults to root
  */
 async function listFiles(root, dirPath) {
   const target = dirPath ? path.resolve(root, dirPath) : root;
@@ -324,6 +347,8 @@ async function listFiles(root, dirPath) {
 
 /**
  * Get diagnostics (problems) from VSCode.
+ * @param {string} root
+ * @param {string} [filePath] - Restrict to a single file; omit for all files
  */
 function getDiagnostics(root, filePath) {
   if (filePath) {
@@ -343,6 +368,10 @@ function getDiagnostics(root, filePath) {
   return out || "No diagnostics found.";
 }
 
+/**
+ * @param {string} filePath
+ * @param {Array<vscode.Diagnostic>} diags
+ */
 function formatDiagnostics(filePath, diags) {
   if (diags.length === 0) return `${filePath}: No issues.`;
 
@@ -365,6 +394,9 @@ function formatDiagnostics(filePath, diags) {
 
 /**
  * Execute a shell command.
+ * @param {string} root
+ * @param {string} command
+ * @param {string} [cwd] - Working directory relative to root
  */
 function runCommand(root, command, cwd) {
   return new Promise((resolve) => {
@@ -391,10 +423,20 @@ function runCommand(root, command, cwd) {
 
 // ── helpers ────────────────────────────────────────────────
 
+/**
+ * @param {string} str
+ * @returns {string}
+ */
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Truncate a result to a reasonable size (100 lines / 8000 chars).
+ * @param {string} text
+ * @param {string} suffix
+ * @returns {string}
+ */
 function limitResult(text, suffix) {
   const lines = text.split("\n");
   if (lines.length > 100) {
@@ -406,6 +448,12 @@ function limitResult(text, suffix) {
   return text;
 }
 
+/**
+ * Truncate text to a maximum length.
+ * @param {string} text
+ * @param {number} maxLen
+ * @returns {string}
+ */
 function limitText(text, maxLen) {
   if (text.length > maxLen) {
     return text.slice(0, maxLen) + "\n... (truncated)";

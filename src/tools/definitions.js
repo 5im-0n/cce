@@ -1,10 +1,21 @@
 const { describeShellForModel } = require("./shellInfo");
 
 /**
+ * @typedef {Object} ToolDefinition
+ * @property {"function"} type
+ * @property {Object} function
+ * @property {string} function.name
+ * @property {string} function.description
+ * @property {object} function.parameters
+ * @property {string} [_mcpServerId]
+ * @property {string} [_mcpToolName]
+ */
+
+/**
  * Tool definitions in OpenAI function-calling format.
  * Each tool has a name, description, and JSON Schema parameters.
  *
- * @type {Array<{ type: "function", function: { name: string, description: string, parameters: object } }>}
+ * @type {Array<ToolDefinition>}
  */
 const TOOL_DEFINITIONS = [
   {
@@ -232,7 +243,7 @@ const TOOL_DEFINITIONS = [
 /**
  * Return the subset of tool definitions that are enabled.
  * @param {Record<string, boolean>} enabledTools
- * @returns {Array<object>}
+ * @returns {Array<ToolDefinition>}
  */
 function getEnabledDefinitions(enabledTools) {
   return TOOL_DEFINITIONS.filter((t) => {
@@ -253,21 +264,22 @@ function getEnabledDefinitions(enabledTools) {
  * child_process.exec does not use the user's terminal shell, so the model
  * must be told which shell actually executes the command.
  *
- * @param {object} tool - The run_command tool definition
- * @returns {object} A copy of the tool with guidance added
+ * @param {ToolDefinition} tool - The run_command tool definition
+ * @returns {ToolDefinition} A copy of the tool with guidance added
  */
 function attachShellGuidance(tool) {
+  const params = /** @type {{ type: string, properties: Record<string, object>, required?: string[] }} */ (tool.function.parameters);
   return {
     ...tool,
     function: {
       ...tool.function,
       description: `${tool.function.description}\n\n${describeShellForModel()}`,
       parameters: {
-        ...tool.function.parameters,
+        ...params,
         properties: {
-          ...tool.function.parameters.properties,
+          ...params.properties,
           command: {
-            ...tool.function.parameters.properties.command,
+            ...params.properties.command,
             description:
               "The shell command to execute. Must use the syntax of the shell " +
               "described in this tool's description (child_process.exec does not " +

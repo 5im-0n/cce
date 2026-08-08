@@ -1,11 +1,44 @@
 const log = require("../config/log").get();
 
 /**
+ * @typedef {Object} ToolCall
+ * @property {string} id
+ * @property {Object} function
+ * @property {string} function.name
+ * @property {string} function.arguments
+ */
+
+/**
+ * @typedef {Object} ContentPart
+ * @property {"text" | "image_url"} [type]
+ * @property {string} [text]
+ * @property {{ url?: string }} [image_url]
+ */
+
+/**
  * @typedef {Object} ChatMessage
- * @property {"system" | "user" | "assistant" | "tool"} role
- * @property {string | Array<object>} [content]
- * @property {Array<object>} [tool_calls]
+ * @property {string} role
+ * @property {string | Array<ContentPart> | null} [content]
+ * @property {Array<ToolCall>} [tool_calls]
  * @property {string} [tool_call_id]
+ */
+
+/**
+ * @typedef {Object} ToolDefinition
+ * @property {"function"} type
+ * @property {Object} function
+ * @property {string} function.name
+ * @property {string} function.description
+ * @property {object} function.parameters
+ * @property {string} [_mcpServerId]
+ * @property {string} [_mcpToolName]
+ */
+
+/**
+ * @typedef {Object} ChatResult
+ * @property {string} text
+ * @property {string} [thinking]
+ * @property {Array<ToolCall>} [toolCalls]
  */
 
 /**
@@ -32,9 +65,9 @@ const anthropicProvider = {
    * @param {string} apiKey
    * @param {function(string): void} onPartial - Called with each text token chunk
    * @param {AbortSignal} [signal]
-   * @param {Array<object>} [tools] - OpenAI-format tool definitions
+   * @param {Array<ToolDefinition>} [tools] - OpenAI-format tool definitions
    * @param {function(string): void} [onThinking] - Called with thinking/reasoning tokens
-   * @returns {Promise<{ text: string, thinking?: string, toolCalls?: Array }>}
+   * @returns {Promise<ChatResult>}
    */
   async chat(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking) {
     const url = endpoint.replace(/\/+$/, "") + "/messages";
@@ -53,7 +86,7 @@ const anthropicProvider = {
       .map((m) => this._convertMessage(m));
 
     // ── 3. Build request body ───────────────────────────────────
-    /** @type {object} */
+    /** @type {Record<string, any>} */
     const body = {
       model: modelId,
       messages: conversationMessages,
@@ -93,6 +126,10 @@ const anthropicProvider = {
         response.status,
         errText
       );
+    }
+
+    if (!response.body) {
+      throw new ProviderError("Empty response body from API", response.status);
     }
 
     // ── 5. Stream SSE events ────────────────────────────────────
@@ -190,6 +227,7 @@ const anthropicProvider = {
     }
 
     // ── 6. Build result ─────────────────────────────────────────
+    /** @type {ChatResult} */
     const result = fullText ? { text: fullText } : { text: "" };
 
     if (thinking) {
@@ -302,7 +340,7 @@ const anthropicProvider = {
    * OpenAI:  { type: "function", function: { name, description, parameters } }
    * Anthropic: { name, description, input_schema }
    *
-   * @param {object} tool - OpenAI-format tool definition
+   * @param {ToolDefinition} tool - OpenAI-format tool definition
    * @returns {object} Anthropic-format tool definition
    */
   _convertTool(tool) {

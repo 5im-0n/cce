@@ -19,7 +19,7 @@ const MAX_STATUS_COMMAND_LENGTH = 200;
  * tools keep the ellipsis suffix (e.g. "Running read_file…").
  *
  * @param {string} toolName - Name of the tool being executed.
- * @param {object} [args]   - Parsed tool arguments.
+ * @param {{ command?: string }} [args] - Parsed tool arguments.
  * @returns {string} ": <command>" when the command is known, otherwise "\u2026".
  */
 function toolStatusSuffix(toolName, args) {

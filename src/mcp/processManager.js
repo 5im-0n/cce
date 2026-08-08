@@ -14,11 +14,17 @@ const REQUEST_TIMEOUT = 30_000;
 
 /**
  * Start a stdio MCP server process.
- * @param {{ id: string, command: string, args?: string[] }} server
+ * @param {{ id: string, command?: string, args?: string[] }} server
+ * @returns {number|undefined} - pid of the spawned process, or undefined if
+ *   the server was already running or has no command configured.
  */
 function start(server) {
   if (processes.has(server.id)) {
     log.appendLine(`MCP process already running for "${server.id}"`);
+    return;
+  }
+  if (!server.command) {
+    log.appendLine(`MCP: cannot start "${server.id}" — no command configured`);
     return;
   }
 
@@ -38,7 +44,7 @@ function start(server) {
     buffer: "",
   };
 
-  proc.stdout.on("data", (data) => {
+  proc.stdout?.on("data", (data) => {
     entry.buffer += data.toString();
     // Process complete lines from buffer
     let newlineIdx;
@@ -59,12 +65,14 @@ function start(server) {
           }
         }
       } catch (e) {
-        log.appendLine(`MCP: failed to parse response: ${e.message} — line: ${line.slice(0, 200)}`);
+        log.appendLine(
+          `MCP: failed to parse response: ${e instanceof Error ? e.message : String(e)} — line: ${line.slice(0, 200)}`
+        );
       }
     }
   });
 
-  proc.stderr.on("data", (data) => {
+  proc.stderr?.on("data", (data) => {
     log.appendLine(`MCP stderr [${server.id}]: ${data.toString().trim()}`);
   });
 
@@ -84,6 +92,7 @@ function start(server) {
 
   processes.set(server.id, entry);
   log.appendLine(`MCP: process started for "${server.id}" (pid ${proc.pid})`);
+  return proc.pid;
 }
 
 /**
@@ -95,11 +104,15 @@ function stop(serverId) {
   if (!entry) return;
   log.appendLine(`MCP: stopping process "${serverId}"`);
   entry.process.kill("SIGTERM");
-  // Force kill after 3s
+  // Force kill after 3s if the process has not exited yet.
+  // The entry is removed from the map immediately (so restarts work),
+  // so capture it in the closure instead of looking it up again.
   setTimeout(() => {
-    const e = processes.get(serverId);
-    if (e && e.process.killed === false) {
-      e.process.kill("SIGKILL");
+    const exited =
+      entry.process.exitCode !== null || entry.process.signalCode !== null;
+    if (!exited) {
+      log.appendLine(`MCP: process "${serverId}" did not exit within 3s, sending SIGKILL`);
+      entry.process.kill("SIGKILL");
     }
   }, 3000);
   processes.delete(serverId);
@@ -119,7 +132,7 @@ function stopAll() {
  * @param {string} serverId
  * @param {string} method
  * @param {object} params
- * @returns {Promise<object>}
+ * @returns {Promise<any>} - JSON-RPC result payload (shape depends on the method)
  */
 function sendRequest(serverId, method, params) {
   const entry = processes.get(serverId);
@@ -137,7 +150,7 @@ function sendRequest(serverId, method, params) {
     }, REQUEST_TIMEOUT);
 
     entry.pending.set(id, { resolve, reject, timer });
-    entry.process.stdin.write(request);
+    entry.process.stdin?.write(request);
   });
 }
 
@@ -160,4 +173,3 @@ function getRunningIds() {
 }
 
 module.exports = { start, stop, stopAll, sendRequest, isRunning, getRunningIds };
-
