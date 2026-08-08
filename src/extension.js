@@ -8,6 +8,7 @@ const { getProvider } = require("./providers/registry");
 const { getEnabledDefinitions } = require("./tools/definitions");
 const { executeToolCall } = require("./tools/executor");
 const { describeShellBrief } = require("./tools/shellInfo");
+const { toolStatusSuffix } = require("./tools/statusText");
 const approval = require("./tools/approval");
 const { fetchMcpTools, callMcpTool } = require("./mcp/client");
 const processManager = require("./mcp/processManager");
@@ -374,7 +375,7 @@ class ChatViewProvider {
             (decision.reason ? " (" + decision.reason + ")" : "") +
             ". Do not retry this tool call — adapt your answer without it.";
         } else {
-          if (this._view) this._view.webview.postMessage({ type: "toolStatus", text: "Running " + tc.function.name + "\u2026" });
+          if (this._view) this._view.webview.postMessage({ type: "toolStatus", text: "Running " + tc.function.name + toolStatusSuffix(tc.function.name, toolArgs) });
           try {
             // Route MCP tools to the MCP client
             if (tc.function.name.startsWith("mcp__")) {
@@ -648,7 +649,7 @@ class ChatViewProvider {
       this._pendingApprovals.set(approvalId, { resolve, timer, toolName });
 
       log.appendLine("Approval: requesting approval for " + toolName + " (" + approvalId + ")");
-      this._view.webview.postMessage({ type: "toolStatus", text: "Awaiting approval: " + toolName + "\u2026" });
+      this._view.webview.postMessage({ type: "toolStatus", text: "Awaiting approval: " + toolName + toolStatusSuffix(toolName, args) });
 
       // Include the server name for MCP tools so the card can show a
       // readable label and offer server-level actions.
