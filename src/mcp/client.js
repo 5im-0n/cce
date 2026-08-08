@@ -1,6 +1,5 @@
 const Settings = require("../config/Settings");
 const processManager = require("./processManager");
-const log = require("../config/log").get();
 
 /**
  * MCP (Model Context Protocol) client.

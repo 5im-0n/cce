@@ -370,7 +370,7 @@ function runCommand(root, command, cwd) {
   return new Promise((resolve) => {
     const workingDir = cwd ? path.resolve(root, cwd) : root;
 
-    const proc = cp.exec(
+    cp.exec(
       command,
       {
         cwd: workingDir,

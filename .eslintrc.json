@@ -1,0 +1,26 @@
+{
+  "root": true,
+  "env": {
+    "node": true,
+    "es2022": true
+  },
+  "extends": ["eslint:recommended"],
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "commonjs"
+  },
+  "globals": {
+    "AbortController": "readonly",
+    "AbortSignal": "readonly",
+    "TextDecoder": "readonly",
+    "TextEncoder": "readonly",
+    "URL": "readonly",
+    "fetch": "readonly",
+    "queueMicrotask": "readonly"
+  },
+  "rules": {
+    // while (true) SSE streaming loops with explicit break are idiomatic
+    "no-constant-condition": ["error", { "checkLoops": false }]
+  },
+  "ignorePatterns": ["node_modules/", "webview-ui/marked.js", "*.vsix"]
+}

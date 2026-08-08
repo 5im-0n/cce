@@ -516,7 +516,6 @@ class ChatViewProvider {
     }));
 
     return results.join("\n\n");
-    return results.join("\n\n");
   }
 
   // ── image attachment ──

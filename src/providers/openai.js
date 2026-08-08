@@ -1,4 +1,3 @@
-const vscode = require("vscode");
 const log = require("../config/log").get();
 
 /**
