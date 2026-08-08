@@ -95,8 +95,6 @@ Enable only the tools you want the model to have access to:
 | Agent | Spawn parallel sub-agents |
 | Run Command | Execute shell commands |
 
-All tools are disabled by default. Enable only what you need.
-
 ### Tool Approval
 
 Every tool call is gated by an approval policy before it executes:
