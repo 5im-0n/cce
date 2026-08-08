@@ -642,6 +642,8 @@
       setAddingMode();
     });
 
+    cancelBtn.addEventListener('click', setAddingMode);
+
     // ── Context tab ──
     var systemPromptEl = document.getElementById('systemPrompt');
     var savePromptBtn = document.getElementById('savePromptBtn');
