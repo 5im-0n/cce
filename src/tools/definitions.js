@@ -1,4 +1,4 @@
-const vscode = require("vscode");
+const { describeShellForModel } = require("./shellInfo");
 
 /**
  * Tool definitions in OpenAI function-calling format.
@@ -240,7 +240,43 @@ function getEnabledDefinitions(enabledTools) {
     // Agent tool is off by default (experimental) — requires explicit opt-in
     if (name === "agent") return enabledTools[name] === true;
     return enabledTools[name] !== false;
+  }).map((t) => {
+    // run_command gets shell guidance so the model writes syntax the actual
+    // exec shell (cmd.exe on Windows, /bin/sh on POSIX) will accept.
+    if (t.function.name === "run_command") return attachShellGuidance(t);
+    return t;
   });
+}
+
+/**
+ * Append shell syntax guidance to the run_command definition.
+ * child_process.exec does not use the user's terminal shell, so the model
+ * must be told which shell actually executes the command.
+ *
+ * @param {object} tool - The run_command tool definition
+ * @returns {object} A copy of the tool with guidance added
+ */
+function attachShellGuidance(tool) {
+  return {
+    ...tool,
+    function: {
+      ...tool.function,
+      description: `${tool.function.description}\n\n${describeShellForModel()}`,
+      parameters: {
+        ...tool.function.parameters,
+        properties: {
+          ...tool.function.parameters.properties,
+          command: {
+            ...tool.function.parameters.properties.command,
+            description:
+              "The shell command to execute. Must use the syntax of the shell " +
+              "described in this tool's description (child_process.exec does not " +
+              "use your terminal shell).",
+          },
+        },
+      },
+    },
+  };
 }
 
 module.exports = { getEnabledDefinitions };

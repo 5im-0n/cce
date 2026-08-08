@@ -7,6 +7,7 @@ const ModelConfigPanel = require("./config/ModelConfigPanel");
 const { getProvider } = require("./providers/registry");
 const { getEnabledDefinitions } = require("./tools/definitions");
 const { executeToolCall } = require("./tools/executor");
+const { describeShellBrief } = require("./tools/shellInfo");
 const approval = require("./tools/approval");
 const { fetchMcpTools, callMcpTool } = require("./mcp/client");
 const processManager = require("./mcp/processManager");
@@ -310,6 +311,8 @@ class ChatViewProvider {
     }
     if (contextFlags.includeOS !== false) {
       contextParts.push("Platform/OS: " + process.platform);
+      // Shell used by the run_command tool (child_process.exec), not the user's terminal
+      contextParts.push(describeShellBrief());
     }
     if (contextFlags.includeRegion !== false) {
       contextParts.push("Locale: " + (Intl.DateTimeFormat().resolvedOptions().locale || "unknown") + ", Timezone: " + (Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown"));
