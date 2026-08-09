@@ -242,6 +242,45 @@ const openaiProvider = {
   // ───────────────────────────────
 
   /**
+   * Convert chat-completions-style content (bare string or array of
+   * {type:"text"|"image_url"} parts) into Responses API content.
+   *
+   * The Responses API rejects chat-completions part types ("text",
+   * "image_url") — it only accepts item types such as "input_text",
+   * "input_image" and "output_text". Bare strings are kept as-is (the
+   * API accepts the string shorthand and that is what already works).
+   *
+   * @param {string | Array<ContentPart> | null | undefined} content
+   * @param {"user" | "assistant"} role
+   * @returns {string | Array<object>}
+   */
+  _convertResponsesContent(content, role) {
+    if (content == null) return "";
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return String(content);
+
+    const textType = role === "assistant" ? "output_text" : "input_text";
+    /** @type {Array<object>} */
+    const items = [];
+    for (const part of content) {
+      if (!part || typeof part !== "object") continue;
+      if (part.type === "text") {
+        items.push({ type: textType, text: part.text || "" });
+      } else if (part.type === "image_url") {
+        const url = part.image_url?.url || "";
+        if (url) {
+          items.push({ type: "input_image", image_url: url });
+        }
+      } else {
+        // Already Responses-shaped (input_text, input_image, ...) or
+        // unknown — pass through untouched rather than guessing.
+        items.push(part);
+      }
+    }
+    return items;
+  },
+
+  /**
    * Send via /v1/responses (GPT-5.6+ reasoning models).
    * The Responses API supports reasoning + tools together natively.
    * @param {ChatMessage[]} messages
@@ -272,12 +311,27 @@ const openaiProvider = {
       }
 
       if (msg.role === "user") {
-        input.push({ role: "user", content: msg.content || "" });
+        input.push({
+          role: "user",
+          content: this._convertResponsesContent(msg.content, "user"),
+        });
         continue;
       }
 
       if (msg.role === "assistant") {
-        // If the assistant message has tool_calls, emit function_call items
+        // Emit the assistant message (text) before its function calls —
+        // canonical order: the model speaks first, then invokes tools.
+        if (msg.content) {
+          const content = this._convertResponsesContent(msg.content, "assistant");
+          if (Array.isArray(content)) {
+            for (const item of content) {
+              input.push(item);
+            }
+          } else {
+            input.push({ role: "assistant", content });
+          }
+        }
+        // If it also has tool_calls, emit function_call items after the text
         if (msg.tool_calls && msg.tool_calls.length > 0) {
           for (const tc of msg.tool_calls) {
             input.push({
@@ -287,10 +341,6 @@ const openaiProvider = {
               arguments: tc.function?.arguments || "",
             });
           }
-        }
-        // If it also has text content, emit an assistant message item
-        if (msg.content) {
-          input.push({ role: "assistant", content: msg.content });
         }
         continue;
       }
