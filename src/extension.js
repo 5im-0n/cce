@@ -425,7 +425,7 @@ class ChatViewProvider {
           // then finalize it in place once the tool returns. The command is
           // already visible in the box's args body, so the running line only
           // shows the tool name.
-          const runningText = "Running " + tc.function.name + "\u2026";
+          const runningText = "Running " + tc.function.name;
           if (this._view) {
             this._view.webview.postMessage({
               type: "toolStart",

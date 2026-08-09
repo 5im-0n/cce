@@ -449,9 +449,6 @@
       cursor: pointer;
       background: var(--vscode-textBlockQuote-background);
       user-select: none;
-      display: flex;
-      align-items: center;
-      gap: 6px;
     }
     .tool-call summary .tool-name {
       font-weight: 600;
@@ -1051,7 +1048,7 @@
         var nearBottom = isNearBottom();
         var tc = document.createElement("details");
         tc.className = "tool-call running";
-        tc.open = true;
+        tc.open = false;
         tc.innerHTML =
           "<summary><span class=tool-name>" + escH(m.toolName) + "</span></summary>" +
           "<div class='tool-body args'>" + escH(m.args || "") + "</div>" +
@@ -1082,7 +1079,7 @@
           // Fallback (e.g. webview reloaded mid-tool): build the box fresh.
           tc = document.createElement("details");
           tc.className = "tool-call";
-          tc.open = true;
+          tc.open = false;
           tc.innerHTML =
             "<summary><span class=tool-name>" + escH(m.toolName) + "</span></summary>" +
             "<div class='tool-body args'>" + escH(m.args || "") + "</div>" +
