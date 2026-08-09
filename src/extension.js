@@ -372,7 +372,7 @@ class ChatViewProvider {
     try {
       await this._chatLoop(messageId, messages, modelConfig, apiKey, provider, tools);
     } catch (err) {
-      if (err && err.name === "AbortError") {
+      if (isAbortError(err)) {
         if (this._view) this._view.webview.postMessage({ type: "responseComplete", messageId });
         return;
       }
@@ -467,7 +467,7 @@ class ChatViewProvider {
             // Aborts must propagate: the request was cancelled, so stop the
             // loop entirely instead of reporting "Error: Aborted" and recursing
             // with a dead signal (which would zombie on past the cancel).
-            if (e && e.name === "AbortError") {
+            if (isAbortError(e)) {
               // Finalize the open tool box so it doesn't sit on "Running …"
               // forever after the user cancels mid-tool.
               if (this._view) {
@@ -859,6 +859,18 @@ class ChatViewProvider {
 // ── extension entry points ──
 
 /**
+ * Check whether an unknown thrown value represents request cancellation.
+ * Supports both Error and DOMException abort values without assuming a shape
+ * for arbitrary values thrown by providers or tools.
+ *
+ * @param {unknown} err
+ * @returns {err is { name: string }}
+ */
+function isAbortError(err) {
+  return typeof err === "object" && err !== null && "name" in err && err.name === "AbortError";
+}
+
+/**
  * @param {vscode.ExtensionContext} context
  */
 function activate(context) {
@@ -877,30 +889,11 @@ function activate(context) {
     })
   );
 
-  // Ensure the activity-bar container is visible. The icon comes from the
-  // manifest and shows on install, but a host may remember a hidden
-  // container state; re-reveal it defensively. Guarded because the API only
-  // exists on newer hosts and this must never throw.
-  try {
-    if (typeof vscode.window.setViewContainerVisibility === "function") {
-      vscode.window.setViewContainerVisibility("cce", true);
-    }
-  } catch (err) {
-    log.appendLine("Failed to reveal CCE container: " + (err instanceof Error ? err.message : String(err)));
-  }
-
-  // Register config panel command
+  // Register the command. VS Code's generated view-focus command is public
+  // API and reveals the activity-bar container when it focuses the view.
   context.subscriptions.push(
     vscode.commands.registerCommand("cce.openChat", () => {
-      // Reveal the container if it was hidden, then focus the chat view
-      try {
-        if (typeof vscode.window.setViewContainerVisibility === "function") {
-          vscode.window.setViewContainerVisibility("cce", true);
-        }
-      } catch (err) {
-        log.appendLine("Failed to reveal CCE container: " + (err instanceof Error ? err.message : String(err)));
-      }
-      vscode.commands.executeCommand("cce.chatView.focus");
+      return vscode.commands.executeCommand("cce.chatView.focus");
     })
   );
 

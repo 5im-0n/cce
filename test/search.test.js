@@ -181,6 +181,11 @@ test("detects NUL bytes as binary", () => {
   assert.equal(looksBinary(Buffer.from([0x48, 0x00, 0x69])), true);
 });
 
+test("accepts Uint8Array values returned by the VS Code file system API", () => {
+  assert.equal(looksBinary(new Uint8Array([0x48, 0x69])), false);
+  assert.equal(looksBinary(new Uint8Array([0x48, 0x00, 0x69])), true);
+});
+
 // ── definition sync ────────────────────────────────────────
 
 test("search_code definition documents glob semantics and no fileTypes", () => {

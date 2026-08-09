@@ -34,7 +34,7 @@ async function executeToolCall(toolName, args, signal, onProgress) {
       return getSelection();
 
     case "search_code":
-      return searchCode(workspaceRoot, args.pattern, args.include, args.exclude, signal, onProgress);
+      return searchCode(args.pattern, args.include, args.exclude, signal, onProgress);
 
     case "list_files":
       return listFiles(workspaceRoot, args.path);
@@ -231,7 +231,6 @@ function getSelection() {
  * Progress: onProgress is invoked every PROGRESS_INTERVAL scanned files with
  * (scanned, total) so the caller can show live status in the webview.
  *
- * @param {string} root
  * @param {string} pattern
  * @param {string} [include] - comma-separated globs of files to search
  * @param {string} [exclude] - comma-separated globs of files to skip
@@ -240,7 +239,7 @@ function getSelection() {
  *   progress updates (scanned files, total files from findFiles)
  * @returns {Promise<string>}
  */
-async function searchCode(root, pattern, include, exclude, signal, onProgress) {
+async function searchCode(pattern, include, exclude, signal, onProgress) {
   if (!pattern || !pattern.trim()) {
     return "Error: pattern is required.";
   }
@@ -294,9 +293,9 @@ async function searchCode(root, pattern, include, exclude, signal, onProgress) {
       onProgress(filesSearched, files.length);
     }
     try {
-      const buf = await vscode.workspace.fs.readFile(file);
-      if (looksBinary(buf)) continue; // skip binary files
-      const lines = buf.toString().split("\n");
+      const bytes = await vscode.workspace.fs.readFile(file);
+      if (looksBinary(bytes)) continue; // skip binary files
+      const lines = Buffer.from(bytes).toString().split("\n");
       const need = MAX_MATCHES - results.length;
       const fileMatches = findMatchesInLines(lines, pattern, need);
       const relPath = vscode.workspace.asRelativePath(file);
@@ -448,14 +447,14 @@ function runCommand(root, command, cwd, signal) {
     );
 
     function onAbort() {
-      killProcessTree(child.pid);
+      if (child.pid !== undefined) killProcessTree(child.pid);
       reject(abortError());
     }
 
     if (signal) {
       if (signal.aborted) {
         // Already cancelled before the child even spawned
-        killProcessTree(child.pid);
+        if (child.pid !== undefined) killProcessTree(child.pid);
         reject(abortError());
         return;
       }

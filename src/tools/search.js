@@ -155,11 +155,11 @@ function formatMatchLines(lines, maxShown, maxLineLength, extra) {
  * Heuristic: true if the buffer is likely binary (contains NUL bytes).
  * Binary files are skipped so decoded garbage can't spuriously "match".
  *
- * @param {Buffer} buf
+ * @param {Uint8Array} bytes
  * @returns {boolean}
  */
-function looksBinary(buf) {
-  return buf.includes(0);
+function looksBinary(bytes) {
+  return bytes.includes(0);
 }
 
 module.exports = {
