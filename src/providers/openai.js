@@ -62,7 +62,7 @@ const openaiProvider = {
    * @param {AbortSignal} [signal]
    * @param {Array<ToolDefinition>} [tools] - OpenAI tool definitions
    * @param {function(string): void} [onThinking] - Called with reasoning/thinking tokens
-   * @param {string} [reasoningEffort] - "off" | "low" | "medium" | "high" (GPT-5.6+)
+   * @param {string} [reasoningEffort] - "off" | "low" | "medium" | "high" | "max"
    * @returns {Promise<ChatResult>}
    */
   async chat(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, reasoningEffort) {

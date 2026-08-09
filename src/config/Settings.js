@@ -343,7 +343,7 @@ function getReasoningEffort() {
 }
 
 /**
- * @param {string} effort - "off" | "low" | "medium" | "high"
+ * @param {string} effort - "off" | "low" | "medium" | "high" | "max"
  */
 async function setReasoningEffort(effort) {
   await _ctx.globalState.update(REASONING_EFFORT_KEY, effort);
