@@ -672,11 +672,23 @@
       return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < threshold;
     }
 
-    function scrollToBottom(wasNear) {
-      if (wasNear === undefined ? isNearBottom() : wasNear) {
+    // The view "sticks" to the bottom until the user scrolls up past the
+    // threshold. Content growth alone (a tool box opening, a long result
+    // arriving) must NOT un-stick it — otherwise auto-scroll stops following
+    // the stream as soon as a tool box expands below the fold.
+    var stickToBottom = true;
+
+    function scrollToBottom() {
+      if (stickToBottom) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
     }
+
+    // Only real user scrolling (or returning to the bottom) changes the stick
+    // state; programmatic scrolls land exactly at the bottom and keep it true.
+    messagesEl.addEventListener("scroll", function () {
+      stickToBottom = isNearBottom();
+    });
 
     // ── send ──
     function sendMessage() {
@@ -705,7 +717,6 @@
       var es = messagesEl.querySelector(".empty-state");
       if (es) es.remove();
 
-      var nearBottom = isNearBottom();
       if (append && streamingEl) {
         streamingEl._rt = (streamingEl._rt || "") + text;
         streamingEl.innerHTML = renderMD(streamingEl._rt);
@@ -739,20 +750,19 @@
         }
         messagesEl.appendChild(el);
       }
-      scrollToBottom(nearBottom);
+      scrollToBottom();
     }
 
     // ── thinking indicator ──
     function showThinking(label) {
       hideThinking();
-      var nearBottom = isNearBottom();
       thinkingEl = document.createElement("div");
       thinkingEl.className = "thinking";
       thinkingEl.innerHTML =
         "<span>" + escH(label) + "</span>" +
         "<span class='dots'><span></span><span></span><span></span></span>";
       messagesEl.appendChild(thinkingEl);
-      scrollToBottom(nearBottom);
+      scrollToBottom();
     }
 
     function hideThinking() {
@@ -763,7 +773,6 @@
     function renderApprovalRequest(m) {
       hideThinking();
       closeStream();
-      var nearBottom = isNearBottom();
       var card = document.createElement("div");
       card.className = "approval-card" + (m.risk === "dangerous" ? " risk-dangerous" : "");
       card.dataset.approvalId = m.approvalId;
@@ -803,7 +812,7 @@
         "<div class='ac-args'>" + escH(m.args || "") + "</div>" +
         "<div class='ac-actions'>" + actions + "</div>";
       messagesEl.appendChild(card);
-      scrollToBottom(nearBottom);
+      scrollToBottom();
 
       card.querySelectorAll(".ac-actions button").forEach(function(btn) {
         btn.addEventListener("click", function() {
@@ -1000,6 +1009,7 @@
 
       } else if (m.type === "clearChat") {
         toolBoxes = {};
+        stickToBottom = true;
         messagesEl.innerHTML = '<div class="empty-state"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><div>Ask anything about your code</div></div>';
 
       } else if (m.type === "historyRestored") {
@@ -1007,6 +1017,7 @@
         closeStream();
         hideThinking();
         toolBoxes = {};
+        stickToBottom = true;
         messagesEl.innerHTML = '';
         var msgs = m.messages || [];
         if (msgs.length === 0) {
@@ -1034,18 +1045,16 @@
           streamingMsgId = m.messageId;
           currentMode = "thinking";
         }
-        var nearBottom = isNearBottom();
         var tc = streamingEl.querySelector(".tc");
         tc._rt = (tc._rt || "") + m.text;
         tc.innerHTML = renderMD(tc._rt);
         tc.scrollTop = tc.scrollHeight;
-        scrollToBottom(nearBottom);
+        scrollToBottom();
       } else if (m.type === "toolStart") {
         // Open the tool box immediately: name, args, and a "Running …" line
         // that the final toolCall replaces with the actual result.
         hideThinking();
         closeStream();
-        var nearBottom = isNearBottom();
         var tc = document.createElement("details");
         tc.className = "tool-call running";
         tc.open = false;
@@ -1055,7 +1064,12 @@
           "<div class='tool-body result'><span class='running-text'>" + escH(m.runningText) + "</span><span class='dots'><span></span><span></span><span></span></span></div>";
         messagesEl.appendChild(tc);
         if (m.toolId) toolBoxes[m.toolId] = tc;
-        scrollToBottom(nearBottom);
+        // Opening a box expands it below the fold: bring it (and whatever
+        // follows it) into view instead of leaving the view stuck.
+        tc.addEventListener("toggle", function () {
+          if (tc.open) tc.scrollIntoView({ block: "nearest" });
+        });
+        scrollToBottom();
       } else if (m.type === "toolDelta") {
         // Live progress for long-running tools (e.g. search_code) lands in
         // the open box, updating the "Running …" line in place.
@@ -1067,7 +1081,6 @@
       } else if (m.type === "toolCall") {
         hideThinking();
         closeStream();
-        var nearBottom = isNearBottom();
         var tc = m.toolId && toolBoxes[m.toolId];
         if (tc) {
           // Finalize the box that toolStart already opened.
@@ -1085,15 +1098,17 @@
             "<div class='tool-body args'>" + escH(m.args || "") + "</div>" +
             "<div class='tool-body result'>" + escH(m.result || "(no output)") + "</div>";
           messagesEl.appendChild(tc);
+          tc.addEventListener("toggle", function () {
+            if (tc.open) tc.scrollIntoView({ block: "nearest" });
+          });
         }
-        scrollToBottom(nearBottom);
+        scrollToBottom();
       } else if (m.type === "toolStatus") {
         showThinking(m.text);
       } else if (m.type === "approvalRequest") {
         renderApprovalRequest(m);
       } else if (m.type === "partialResponse") {
         hideThinking();
-        var nearBottom = isNearBottom();
         if (currentMode !== "text") {
           closeStream();
           streamingEl = document.createElement("div");
@@ -1104,7 +1119,7 @@
         }
         streamingEl._rt = (streamingEl._rt || "") + m.text;
         streamingEl.innerHTML = renderMD(streamingEl._rt);
-        scrollToBottom(nearBottom);
+        scrollToBottom();
       } else if (m.type === "responseComplete") {
         closeStream();
         hideThinking();
