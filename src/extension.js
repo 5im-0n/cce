@@ -372,7 +372,7 @@ class ChatViewProvider {
     try {
       await this._chatLoop(messageId, messages, modelConfig, apiKey, provider, tools);
     } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") {
+      if (err && err.name === "AbortError") {
         if (this._view) this._view.webview.postMessage({ type: "responseComplete", messageId });
         return;
       }
@@ -433,9 +433,25 @@ class ChatViewProvider {
               // Approving the agent call trusts everything its sub-agents do
               toolResult = await this._runAgent(toolArgs, modelConfig, apiKey, provider);
             } else {
-              toolResult = await executeToolCall(tc.function.name, toolArgs);
+              toolResult = await executeToolCall(
+                tc.function.name,
+                toolArgs,
+                signal,
+                (scanned, total) => {
+                  if (this._view) {
+                    this._view.webview.postMessage({
+                      type: "toolStatus",
+                      text: "search_code: scanned " + scanned + "/" + total + " files",
+                    });
+                  }
+                }
+              );
             }
           } catch (e) {
+            // Aborts must propagate: the request was cancelled, so stop the
+            // loop entirely instead of reporting "Error: Aborted" and recursing
+            // with a dead signal (which would zombie on past the cancel).
+            if (e && e.name === "AbortError") throw e;
             toolResult = "Error: " + (e instanceof Error ? e.message : String(e));
           }
         }
@@ -658,8 +674,11 @@ class ChatViewProvider {
 
   _handleCancel() {
     if (this._abortController) {
+      // Deliberately NOT nulled here: the request is still unwinding. Keeping
+      // the (now aborted) controller means any loop recursion re-captures an
+      // aborted signal and stops, instead of continuing with `undefined` and
+      // zombie-ing on after the cancel. _sendMessage's finally nulls it.
       this._abortController.abort();
-      this._abortController = null;
     }
     // Any tool calls waiting on approval belong to the cancelled request
     this._rejectAllPendingApprovals("Request cancelled");

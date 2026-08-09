@@ -7,9 +7,14 @@ const cp = require("child_process");
  *
  * @param {string} toolName
  * @param {Record<string, any>} args
+ * @param {AbortSignal} [signal] - cancellation signal from the chat request;
+ *   forwarded to tools that support it (search_code)
+ * @param {(scanned: number, total: number) => void} [onProgress] - live
+ *   progress callback for long-running tools (search_code); the caller posts
+ *   it to the webview as toolStatus
  * @returns {Promise<string>}
  */
-async function executeToolCall(toolName, args) {
+async function executeToolCall(toolName, args, signal, onProgress) {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
 
   switch (toolName) {
@@ -29,7 +34,7 @@ async function executeToolCall(toolName, args) {
       return getSelection();
 
     case "search_code":
-      return searchCode(workspaceRoot, args.pattern, args.fileTypes);
+      return searchCode(workspaceRoot, args.pattern, args.include, args.exclude, signal, onProgress);
 
     case "list_files":
       return listFiles(workspaceRoot, args.path);
@@ -205,48 +210,126 @@ function getSelection() {
 
 /**
  * Search workspace for a literal pattern using the VSCode workspace API.
+ *
+ * Glob semantics are VSCode's, passed through verbatim (see the tool
+ * definition for the contract). No file cap — findFiles scans everything, so a
+ * definitive "No matches found." is never a false negative.
+ *
+ * Two honest limits bound worst-case cost:
+ * - Collection stops early at MAX_MATCHES: a broad pattern (e.g. ":") returns
+ *   quickly instead of building a huge result array, and the result then
+ *   reports "N+ matches" so the model knows more exist and narrows the search.
+ * - The scan stops after MAX_FILES_SCANNED files; the result then says
+ *   "first N of M files scanned" so an early "No matches found." is never
+ *   presented as definitive.
+ *
+ * Cancellable: the caller's AbortSignal is forwarded to findFiles (via a
+ * CancellationTokenSource) and checked before each file read. Throws an
+ * AbortError (name === "AbortError") on cancellation so the chat loop stops
+ * the whole request instead of continuing with a dead signal.
+ *
+ * Progress: onProgress is invoked every PROGRESS_INTERVAL scanned files with
+ * (scanned, total) so the caller can show live status in the webview.
+ *
  * @param {string} root
  * @param {string} pattern
- * @param {string} [fileTypes]
+ * @param {string} [include] - comma-separated globs of files to search
+ * @param {string} [exclude] - comma-separated globs of files to skip
+ * @param {AbortSignal} [signal] - cancellation signal from the chat request
+ * @param {(scanned: number, total: number) => void} [onProgress] - live
+ *   progress updates (scanned files, total files from findFiles)
  * @returns {Promise<string>}
  */
-async function searchCode(root, pattern, fileTypes) {
+async function searchCode(root, pattern, include, exclude, signal, onProgress) {
   if (!pattern || !pattern.trim()) {
     return "Error: pattern is required.";
   }
 
-  const { buildFileGlob, findMatchesInLines, looksBinary } = require("./search");
-  const glob = buildFileGlob(fileTypes);
+  const {
+    buildIncludeGlob,
+    buildExcludeGlob,
+    findMatchesInLines,
+    formatMatchLines,
+    looksBinary,
+    MAX_MATCHES,
+    MAX_FILES_SCANNED,
+    PROGRESS_INTERVAL,
+  } = require("./search");
+  const includeGlob = buildIncludeGlob(include);
+  const excludeGlob = buildExcludeGlob(exclude);
+
+  if (signal && signal.aborted) throw abortError();
+
+  // Forward the caller's signal to findFiles so an abort stops the walk.
+  const cts = new vscode.CancellationTokenSource();
+  const onAbort = () => cts.cancel();
+  if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
   let files;
   try {
-    files = await vscode.workspace.findFiles(glob, "**/node_modules/**", 200);
+    files = await vscode.workspace.findFiles(includeGlob, excludeGlob, undefined, cts.token);
   } catch {
-    return `Error: invalid fileTypes filter: ${fileTypes}`;
+    if (cts.token.isCancellationRequested) throw abortError();
+    return `Error: invalid search glob (include: '${include ?? ""}', exclude: '${exclude ?? ""}'). Use VSCode glob syntax with '/' separators.`;
+  } finally {
+    if (signal) signal.removeEventListener("abort", onAbort);
+    cts.dispose();
   }
   if (files.length === 0) return "No files found to search.";
 
   const results = [];
+  let filesSearched = 0;
+  let capped = false; // stopped early at MAX_MATCHES matches
+  let budgetExceeded = false; // stopped early at MAX_FILES_SCANNED files
   for (const file of files) {
+    if (signal && signal.aborted) throw abortError();
+    if (filesSearched >= MAX_FILES_SCANNED) {
+      // Honest under-count: unscanned files may still match, so the result
+      // reports "first N of M files" instead of a false "No matches found."
+      budgetExceeded = true;
+      break;
+    }
+    filesSearched++;
+    if (onProgress && filesSearched % PROGRESS_INTERVAL === 0) {
+      onProgress(filesSearched, files.length);
+    }
     try {
       const buf = await vscode.workspace.fs.readFile(file);
       if (looksBinary(buf)) continue; // skip binary files
       const lines = buf.toString().split("\n");
-      for (const m of findMatchesInLines(lines, pattern)) {
-        const relPath = vscode.workspace.asRelativePath(file);
+      const need = MAX_MATCHES - results.length;
+      const fileMatches = findMatchesInLines(lines, pattern, need);
+      const relPath = vscode.workspace.asRelativePath(file);
+      for (const m of fileMatches) {
         results.push(`${relPath}:${m.line}: ${m.text.trim()}`);
-        if (results.length >= 100) break;
+      }
+      if (fileMatches.length >= need) {
+        // At least MAX_MATCHES exist; stop scanning further files.
+        capped = true;
+        break;
       }
     } catch { /* skip unreadable files */ }
-    if (results.length >= 100) break;
   }
 
   if (results.length === 0) {
-    // findFiles caps at 200; if we hit the cap the result may be incomplete
-    const capped = files.length >= 200 ? " in the first 200 files" : "";
-    return `No matches found${capped}.`;
+    if (budgetExceeded) {
+      return `No matches found in the first ${filesSearched} of ${files.length} files scanned (more remain — narrow with include/exclude).`;
+    }
+    return "No matches found.";
   }
-  return limitResult(results.join("\n"), `... (${results.length} matches)`);
+  return formatMatchLines(results, MAX_MATCHES, 500, { capped, filesSearched, budgetExceeded, totalFiles: files.length });
+}
+
+/**
+ * Create an AbortError for cancellation propagation. The chat loop matches on
+ * `name === "AbortError"` (deliberately without `instanceof Error`, since
+ * fetch's abort DOMException also carries this name).
+ * @returns {Error}
+ */
+function abortError() {
+  const err = new Error("Aborted");
+  err.name = "AbortError";
+  return err;
 }
 
 /**

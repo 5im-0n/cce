@@ -1,4 +1,5 @@
 const { describeShellForModel } = require("./shellInfo");
+const { MAX_MATCHES, MAX_FILES_SCANNED } = require("./search");
 
 /**
  * @typedef {Object} ToolDefinition
@@ -60,20 +61,32 @@ const TOOL_DEFINITIONS = [
     type: "function",
     function: {
       name: "search_code",
-      description:
-        "Search for a literal pattern in the workspace (case-insensitive). Returns matching file paths, line numbers, and content.",
+      description: `Search the workspace for a literal pattern (case-insensitive). Returns matching file paths, line numbers, and content.
+
+Glob semantics follow VSCode exactly: use '/' path separators (never backslash). '*' matches within one path segment, '**' matches across directories, '{a,b}' lists alternatives, '?' matches one character. Pass comma-separated globs to combine patterns; multiple globs are treated as a {a,b} union.
+
+include: comma-separated globs of files to search (default: all files). Remember '*' does not cross '/': '*.ts' matches only .ts files in the workspace root, '**/*.ts' includes subdirectories.
+
+exclude: comma-separated globs of files to skip. If omitted, the workspace files.exclude setting applies (same as VSCode search). Nothing is excluded automatically — node_modules, .git, build output, etc. are searched unless you exclude them. Searching without an exclude scans node_modules and build output, which is slow and can exhaust the scan budget described below.
+
+The scan stops after ${MAX_FILES_SCANNED.toLocaleString("en-US")} files; results then report 'first N of M files scanned' so you know more files remain — narrow the search with include/exclude. The search also stops once ${MAX_MATCHES} matches are collected; a result saying '${MAX_MATCHES}+ matches' means more exist but were not returned. Common patterns such as 'function', ':', or 'return' without include/exclude are expensive: always scope them.`,
       parameters: {
         type: "object",
         properties: {
           pattern: {
             type: "string",
             description:
-              "Search pattern (literal string, matched case-insensitively by default)",
+              "Literal string to find (matched case-insensitively)",
           },
-          fileTypes: {
+          include: {
             type: "string",
             description:
-              "Optional comma-separated file extensions to filter (e.g. '.js,.ts')",
+              "Comma-separated VSCode globs of files to search (default: all files). Use '**/*.ts' to recurse; '*.ts' matches root-level only.",
+          },
+          exclude: {
+            type: "string",
+            description:
+              "Comma-separated VSCode globs of files to skip (e.g. '**/node_modules/**,**/.git/**'). Omit to use the files.exclude setting.",
           },
         },
         required: ["pattern"],
