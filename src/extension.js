@@ -877,9 +877,29 @@ function activate(context) {
     })
   );
 
+  // Ensure the activity-bar container is visible. The icon comes from the
+  // manifest and shows on install, but a host may remember a hidden
+  // container state; re-reveal it defensively. Guarded because the API only
+  // exists on newer hosts and this must never throw.
+  try {
+    if (typeof vscode.window.setViewContainerVisibility === "function") {
+      vscode.window.setViewContainerVisibility("cce", true);
+    }
+  } catch (err) {
+    log.appendLine("Failed to reveal CCE container: " + (err instanceof Error ? err.message : String(err)));
+  }
+
   // Register config panel command
   context.subscriptions.push(
     vscode.commands.registerCommand("cce.openChat", () => {
+      // Reveal the container if it was hidden, then focus the chat view
+      try {
+        if (typeof vscode.window.setViewContainerVisibility === "function") {
+          vscode.window.setViewContainerVisibility("cce", true);
+        }
+      } catch (err) {
+        log.appendLine("Failed to reveal CCE container: " + (err instanceof Error ? err.message : String(err)));
+      }
       vscode.commands.executeCommand("cce.chatView.focus");
     })
   );

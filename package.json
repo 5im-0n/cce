@@ -22,11 +22,11 @@
   "main": "./src/extension.js",
   "contributes": {
     "viewsContainers": {
-      "secondarySidebar": [
+      "activitybar": [
         {
           "id": "cce",
           "title": "CCE Chat",
-          "icon": "$(comment-discussion)"
+          "icon": "resources/icon.svg"
         }
       ]
     },
@@ -36,7 +36,7 @@
           "type": "webview",
           "id": "cce.chatView",
           "name": "Chat",
-          "icon": "$(comment-discussion)",
+          "icon": "resources/icon.svg",
           "contextValue": "cce.chatView"
         }
       ]

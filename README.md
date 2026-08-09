@@ -53,7 +53,7 @@ Open the project in VSCode and press **F5**. This launches an Extension Developm
 
 ## Configuration
 
-Open CCE from the right sidebar. Click the **gear icon** to open settings.
+Open CCE from the chat icon in the activity bar on the left. Click the **gear icon** to open settings.
 
 ### Models
 
