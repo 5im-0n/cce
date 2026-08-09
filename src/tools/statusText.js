@@ -1,9 +1,10 @@
 /**
  * Transient tool-status helpers for the chat webview.
  *
- * Produces the short status lines shown while a tool is pending or running,
- * e.g. "Running run_command: git status". Kept in their own module so the
- * logic can be unit-tested without pulling in the vscode dependency.
+ * Produces the short status lines shown while a tool is pending approval,
+ * e.g. "Awaiting approval: run_command: git status". Kept in their own
+ * module so the logic can be unit-tested without pulling in the vscode
+ * dependency.
  */
 
 // Max length of a command shown in the transient status line. Longer
@@ -15,8 +16,9 @@ const MAX_STATUS_COMMAND_LENGTH = 200;
  * Build the trailing part of a tool status line.
  *
  * For `run_command` the exact command is included so the user can see what
- * is being executed (e.g. "Running run_command: git status"). All other
- * tools keep the ellipsis suffix (e.g. "Running read_file…").
+ * they are being asked to approve (e.g. "Awaiting approval: run_command:
+ * git status"). All other tools keep the ellipsis suffix (e.g. "Awaiting
+ * approval: read_file…").
  *
  * @param {string} toolName - Name of the tool being executed.
  * @param {{ command?: string }} [args] - Parsed tool arguments.

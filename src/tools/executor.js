@@ -8,7 +8,7 @@ const cp = require("child_process");
  * @param {string} toolName
  * @param {Record<string, any>} args
  * @param {AbortSignal} [signal] - cancellation signal from the chat request;
- *   forwarded to tools that support it (search_code)
+ *   forwarded to tools that support it (search_code, run_command)
  * @param {(scanned: number, total: number) => void} [onProgress] - live
  *   progress callback for long-running tools (search_code); the caller posts
  *   it to the webview as toolStatus
@@ -43,7 +43,7 @@ async function executeToolCall(toolName, args, signal, onProgress) {
       return getDiagnostics(workspaceRoot, args.path);
 
     case "run_command":
-      return runCommand(workspaceRoot, args.command, args.cwd);
+      return runCommand(workspaceRoot, args.command, args.cwd, signal);
 
     default:
       return `Unknown tool: ${toolName}`;
@@ -413,15 +413,23 @@ function formatDiagnostics(filePath, diags) {
 
 /**
  * Execute a shell command.
+ *
+ * Honors the abort signal: on cancel the child process tree is killed
+ * (plain `child.kill()` would only kill `cmd.exe`, orphaning grandchildren
+ * like `ping`), and the promise rejects with an AbortError so the chat loop
+ * stops and finalizes the tool box instead of hanging on "Running …".
+ *
  * @param {string} root
  * @param {string} command
  * @param {string} [cwd] - Working directory relative to root
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<string>}
  */
-function runCommand(root, command, cwd) {
-  return new Promise((resolve) => {
+function runCommand(root, command, cwd, signal) {
+  return new Promise((resolve, reject) => {
     const workingDir = cwd ? path.resolve(root, cwd) : root;
 
-    cp.exec(
+    const child = cp.exec(
       command,
       {
         cwd: workingDir,
@@ -430,6 +438,7 @@ function runCommand(root, command, cwd) {
         windowsHide: true,
       },
       (err, stdout, stderr) => {
+        if (signal) signal.removeEventListener("abort", onAbort);
         let out = "";
         if (stdout) out += stdout;
         if (stderr) out += (out ? "\n" : "") + stderr;
@@ -437,7 +446,45 @@ function runCommand(root, command, cwd) {
         resolve(limitText(out, 4000) || "(no output)");
       }
     );
+
+    function onAbort() {
+      killProcessTree(child.pid);
+      reject(abortError());
+    }
+
+    if (signal) {
+      if (signal.aborted) {
+        // Already cancelled before the child even spawned
+        killProcessTree(child.pid);
+        reject(abortError());
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
   });
+}
+
+/**
+ * Kill a child process and its entire process tree.
+ * @param {number} pid
+ */
+function killProcessTree(pid) {
+  if (!pid) return;
+  if (process.platform === "win32") {
+    // taskkill /T kills the whole tree (/F force-kills); child.kill() alone
+    // would leave grandchildren (e.g. `ping` under `cmd /c`) running.
+    cp.exec(`taskkill /pid ${pid} /T /F`, { windowsHide: true }, () => {});
+  } else {
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // Process already gone
+      }
+    }
+  }
 }
 
 // ── helpers ────────────────────────────────────────────────

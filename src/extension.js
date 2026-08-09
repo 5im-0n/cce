@@ -421,7 +421,21 @@ class ChatViewProvider {
             (decision.reason ? " (" + decision.reason + ")" : "") +
             ". Do not retry this tool call — adapt your answer without it.";
         } else {
-          if (this._view) this._view.webview.postMessage({ type: "toolStatus", text: "Running " + tc.function.name + toolStatusSuffix(tc.function.name, toolArgs) });
+          // Render the tool box up-front with args and a "Running …" line,
+          // then finalize it in place once the tool returns. The command is
+          // already visible in the box's args body, so the running line only
+          // shows the tool name.
+          const runningText = "Running " + tc.function.name + "\u2026";
+          if (this._view) {
+            this._view.webview.postMessage({
+              type: "toolStart",
+              messageId,
+              toolId: tc.id,
+              toolName: tc.function.name,
+              args: JSON.stringify(toolArgs, null, 2),
+              runningText,
+            });
+          }
           try {
             // Route MCP tools to the MCP client
             if (tc.function.name.startsWith("mcp__")) {
@@ -440,8 +454,10 @@ class ChatViewProvider {
                 (scanned, total) => {
                   if (this._view) {
                     this._view.webview.postMessage({
-                      type: "toolStatus",
-                      text: "search_code: scanned " + scanned + "/" + total + " files",
+                      type: "toolDelta",
+                      messageId,
+                      toolId: tc.id,
+                      runningText: runningText + " — scanned " + scanned + "/" + total + " files",
                     });
                   }
                 }
@@ -451,7 +467,21 @@ class ChatViewProvider {
             // Aborts must propagate: the request was cancelled, so stop the
             // loop entirely instead of reporting "Error: Aborted" and recursing
             // with a dead signal (which would zombie on past the cancel).
-            if (e && e.name === "AbortError") throw e;
+            if (e && e.name === "AbortError") {
+              // Finalize the open tool box so it doesn't sit on "Running …"
+              // forever after the user cancels mid-tool.
+              if (this._view) {
+                this._view.webview.postMessage({
+                  type: "toolCall",
+                  messageId,
+                  toolId: tc.id,
+                  toolName: tc.function.name,
+                  args: JSON.stringify(toolArgs, null, 2),
+                  result: "Aborted by user",
+                });
+              }
+              throw e;
+            }
             toolResult = "Error: " + (e instanceof Error ? e.message : String(e));
           }
         }
@@ -461,6 +491,7 @@ class ChatViewProvider {
           this._view.webview.postMessage({
             type: "toolCall",
             messageId,
+            toolId: tc.id,
             toolName: tc.function.name,
             args: JSON.stringify(toolArgs, null, 2),
             result: String(toolResult).slice(0, 2000),
