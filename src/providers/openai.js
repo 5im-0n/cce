@@ -359,8 +359,17 @@ const openaiProvider = {
       log.appendLine(
         `OpenAI Responses error ${response.status}: ${response.statusText}${errText ? " — " + errText.slice(0, 500) : ""}`
       );
+      // This path is only reached when reasoning is active, so a 400 here
+      // often means the model doesn't support the Responses API / reasoning.
+      // Hint the user accordingly (plain-text append, no protocol change).
+      // "Off" only stops sending the reasoning parameter (and switches to
+      // the standard chat endpoint) — the model may still reason internally.
+      const hint =
+        response.status === 400
+          ? ' — Hint: this request was sent with the reasoning parameter enabled. Setting the Reasoning effort to "Off" stops sending that parameter (the request then uses the standard chat endpoint), which may avoid this 400 if the model rejects the reasoning request format. Note: "Off" only skips the parameter — the model may still reason internally on its own.'
+          : "";
       throw new ProviderError(
-        `API error ${response.status}: ${response.statusText}${errText ? " — " + errText.slice(0, 500) : ""}`,
+        `API error ${response.status}: ${response.statusText}${errText ? " — " + errText.slice(0, 500) : ""}${hint}`,
         response.status,
         errText
       );
