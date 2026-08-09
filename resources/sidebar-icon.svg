@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Continuous Speech Bubble Outline -->
+  <path d="M 24 20
+           H 104
+           A 16 16 0 0 1 120 36
+           V 76
+           A 16 16 0 0 1 104 92
+           H 40
+           L 16 108
+           L 24 92
+           A 16 16 0 0 1 8 76
+           V 36
+           A 16 16 0 0 1 24 20
+           Z"
+        fill="none" stroke="#007ACC" stroke-width="3" stroke-linejoin="round"/>
+
+  <!-- < \ > symbols -->
+  <polyline points="44,44 32,56 44,68" fill="none" stroke="#007ACC" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="56" y1="44" x2="72" y2="68" stroke="#007ACC" stroke-width="6" stroke-linecap="round"/>
+  <polyline points="84,44 96,56 84,68" fill="none" stroke="#007ACC" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
