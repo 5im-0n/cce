@@ -16,6 +16,7 @@
   },
   "categories": [
     "Chat",
+    "AI",
     "Other"
   ],
   "main": "./src/extension.js",
