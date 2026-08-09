@@ -204,112 +204,48 @@ function getSelection() {
 }
 
 /**
- * Search workspace using ripgrep (via workspace.findFiles + grep) or fallback.
+ * Search workspace for a literal pattern using the VSCode workspace API.
  * @param {string} root
  * @param {string} pattern
  * @param {string} [fileTypes]
+ * @returns {Promise<string>}
  */
 async function searchCode(root, pattern, fileTypes) {
-  // Try ripgrep first, fallback to VSCode API
-  try {
-    return await ripgrepSearch(root, pattern, fileTypes);
-  } catch {
-    return await vscodeSearch(pattern, fileTypes);
+  if (!pattern || !pattern.trim()) {
+    return "Error: pattern is required.";
   }
-}
 
-/**
- * Use ripgrep binary (bundled with VSCode) for fast search.
- * @param {string} root
- * @param {string} pattern
- * @param {string} [fileTypes]
- * @returns {Promise<string>}
- */
-function ripgrepSearch(root, pattern, fileTypes) {
-  return new Promise((resolve) => {
-    const rgPath = path.join(
-      vscode.env.appRoot,
-      "..",
-      "resources",
-      "app",
-      "node_modules.asar.unpacked",
-      "@vscode",
-      "ripgrep",
-      "bin",
-      "rg"
-    );
+  const { buildFileGlob, findMatchesInLines, looksBinary } = require("./search");
+  const glob = buildFileGlob(fileTypes);
 
-    const args = ["--no-heading", "--line-number", "-n", "--color", "never", "-i"];
-    if (fileTypes) {
-      fileTypes.split(",").forEach((ext) => {
-        const cleaned = ext.trim().replace(/^\./, "");
-        args.push("--type-add", `custom:*.${cleaned}`);
-        args.push("--type", "custom");
-      });
-    }
-    args.push("--", pattern, root);
-
-    const proc = cp.spawn(rgPath, args, {
-      cwd: root,
-      timeout: 10000,
-      windowsHide: true,
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    proc.stdout.on("data", (d) => { stdout += d; });
-    proc.stderr.on("data", (d) => { stderr += d; });
-
-    proc.on("error", () => {
-      resolve(vscodeSearch(pattern, fileTypes));
-    });
-
-    proc.on("close", (code) => {
-      if (code === 1 && !stdout) {
-        resolve("No matches found.");
-      } else if (stdout) {
-        resolve(limitResult(stdout, "... (results truncated)"));
-      } else {
-        resolve(stderr || `ripgrep exited with code ${code}`);
-      }
-    });
-  });
-}
-
-/**
- * Fallback search using VSCode workspace API.
- * @param {string} pattern
- * @param {string} [fileTypes]
- * @returns {Promise<string>}
- */
-async function vscodeSearch(pattern, fileTypes) {
-  const patternStr = fileTypes
-    ? `**/*.{${fileTypes.split(",").map((s) => s.trim().replace(/^\./, "")).join(",")}}`
-    : "**/*";
-
-  const files = await vscode.workspace.findFiles(patternStr, "**/node_modules/**", 50);
+  let files;
+  try {
+    files = await vscode.workspace.findFiles(glob, "**/node_modules/**", 200);
+  } catch {
+    return `Error: invalid fileTypes filter: ${fileTypes}`;
+  }
   if (files.length === 0) return "No files found to search.";
 
   const results = [];
-  const regex = new RegExp(escapeRegex(pattern), "gi");
-
   for (const file of files) {
     try {
-      const content = (await vscode.workspace.fs.readFile(file)).toString();
-      const lines = content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (regex.test(lines[i])) {
-          const relPath = vscode.workspace.asRelativePath(file);
-          results.push(`${relPath}:${i + 1}: ${lines[i].trim()}`);
-          if (results.length >= 50) break;
-        }
+      const buf = await vscode.workspace.fs.readFile(file);
+      if (looksBinary(buf)) continue; // skip binary files
+      const lines = buf.toString().split("\n");
+      for (const m of findMatchesInLines(lines, pattern)) {
+        const relPath = vscode.workspace.asRelativePath(file);
+        results.push(`${relPath}:${m.line}: ${m.text.trim()}`);
+        if (results.length >= 100) break;
       }
     } catch { /* skip unreadable files */ }
-    if (results.length >= 50) break;
+    if (results.length >= 100) break;
   }
 
-  if (results.length === 0) return "No matches found.";
+  if (results.length === 0) {
+    // findFiles caps at 200; if we hit the cap the result may be incomplete
+    const capped = files.length >= 200 ? " in the first 200 files" : "";
+    return `No matches found${capped}.`;
+  }
   return limitResult(results.join("\n"), `... (${results.length} matches)`);
 }
 
@@ -422,14 +358,6 @@ function runCommand(root, command, cwd) {
 }
 
 // ── helpers ────────────────────────────────────────────────
-
-/**
- * @param {string} str
- * @returns {string}
- */
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 /**
  * Truncate a result to a reasonable size (100 lines / 8000 chars).

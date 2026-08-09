@@ -722,7 +722,7 @@
     var TOOL_DEFS = [
       { name: 'read_file', label: 'Read File', desc: 'Read contents of workspace files.', risk: 'read' },
       { name: 'get_selection', label: 'Get Selection', desc: 'Get the current editor selection and cursor position.', risk: 'read' },
-      { name: 'search_code', label: 'Search Code', desc: 'Search workspace with ripgrep for patterns.', risk: 'read' },
+      { name: 'search_code', label: 'Search Code', desc: 'Search workspace for literal patterns (case-insensitive).', risk: 'read' },
       { name: 'list_files', label: 'List Files', desc: 'List files and directories in the workspace.', risk: 'read' },
       { name: 'get_diagnostics', label: 'Get Diagnostics', desc: 'Read VSCode errors, warnings, and hints.', risk: 'read' },
       { name: 'write_file', label: 'Write File', desc: 'Create a new file or completely overwrite an existing file.', risk: 'modify' },

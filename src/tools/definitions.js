@@ -61,7 +61,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: "search_code",
       description:
-        "Search for a pattern in the workspace using ripgrep. Returns matching file paths, line numbers, and content.",
+        "Search for a literal pattern in the workspace (case-insensitive). Returns matching file paths, line numbers, and content.",
       parameters: {
         type: "object",
         properties: {

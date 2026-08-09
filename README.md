@@ -88,7 +88,7 @@ Enable only the tools you want the model to have access to:
 | Read File | Read workspace files with line numbers |
 | Write File | Create, overwrite, insert, replace, or delete lines |
 | Get Selection | Current editor selection and cursor position |
-| Search Code | Ripgrep search with VSCode fallback |
+| Search Code | Literal, case-insensitive workspace search |
 | List Files | Directory listing |
 | Get Diagnostics | VSCode errors, warnings, hints |
 | Delete File | Remove files or directories |
