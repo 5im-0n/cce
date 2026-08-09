@@ -391,7 +391,7 @@
       <div class="form-group">
         <label for="endpoint">API Endpoint</label>
         <input type="text" id="endpoint" placeholder="e.g. https://api.openai.com/v1" />
-        <div class="api-key-hint">For OpenAI-compatible endpoints that don't support the Responses API (vLLM, LiteLLM, local proxies), set the reasoning effort to "Off" in the chat panel.</div>
+        <div class="api-key-hint">For OpenAI-compatible endpoints that don't support the Responses API (vLLM, LiteLLM, local proxies), set the Reasoning effort to "Off" in the chat panel. "Off" only stops sending the reasoning parameter (the request then uses the standard chat endpoint) — the model may still reason internally on its own.</div>
       </div>
     </div>
     <div class="form-group">

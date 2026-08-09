@@ -621,7 +621,7 @@
         <select id="modelSelect">
           <option value="">No models</option>
         </select>
-        <select id="reasoningSelect" title="Reasoning effort — requires an OpenAI endpoint that supports the Responses API. Set to 'Off' for compatible providers (vLLM, LiteLLM, local proxies).">
+        <select id="reasoningSelect" title="Reasoning effort — non-'Off' values require an OpenAI endpoint that supports the Responses API. 'Off' only skips the reasoning parameter (the request then uses the standard chat endpoint); the model may still reason internally on its own.">
           <option value="off">Off</option>
           <option value="low">Low</option>
           <option value="medium" selected>Medium</option>
