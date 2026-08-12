@@ -110,6 +110,9 @@ class ModelConfigPanel {
         case "setSessionsMaxAge":
           await Settings.setSessionsMaxAge(msg.maxAgeDays);
           break;
+        case "setCompaction":
+          await Settings.setCompaction(msg.config);
+          break;
         case "deleteExpiredSessions":
           await ModelConfigPanel._deleteExpiredSessions();
           break;
@@ -144,6 +147,7 @@ class ModelConfigPanel {
       mcpServers: Settings.getMcpServers(),
       sessions: Settings.getAllSessions(),
       sessionsMaxAge: Settings.getSessionsMaxAge(),
+      compaction: Settings.getCompaction(),
     });
     // Also send process status
     ModelConfigPanel._postMcpStatus();

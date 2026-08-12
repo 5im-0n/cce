@@ -433,6 +433,29 @@
       <input type="text" id="agentsMdPath" placeholder="AGENTS.md">
     </div>
 
+    <h3>Auto Compaction</h3>
+    <div class="api-key-hint" style="margin-bottom:12px">
+      When the estimated request size passes the threshold, older messages are folded into a summary so the conversation stays within the model's context window. Images in compacted messages are dropped.
+    </div>
+    <div class="form-group">
+      <label for="compactionMode">Mode</label>
+      <select id="compactionMode">
+        <option value="off">Off</option>
+        <option value="auto">Auto &mdash; compact silently</option>
+        <option value="ask">Ask &mdash; confirm before compacting</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="compactionThreshold">Trigger threshold (tokens)</label>
+      <input type="number" id="compactionThreshold" min="1000" step="1000" placeholder="300000">
+      <div class="api-key-hint">Rough estimate, not exact. When exceeded, older messages get compacted.</div>
+    </div>
+    <div class="form-group">
+      <label for="compactionKeepTurns">Keep recent turns verbatim</label>
+      <input type="number" id="compactionKeepTurns" min="1" max="100" placeholder="10">
+      <div class="api-key-hint">The most recent N user messages (and their replies) are never summarized.</div>
+    </div>
+
     <div class="actions">
       <button class="btn-primary" id="savePromptBtn">Save</button>
       <span id="promptSaved" style="display:none; font-size:12px; color: var(--vscode-descriptionForeground); padding:6px 0">Saved.</span>
@@ -715,6 +738,25 @@
     agentsMdPathEl.addEventListener('change', function () {
       vscode.postMessage({ type: 'setAgentsMdPath', path: agentsMdPathEl.value.trim() });
     });
+
+    // ── Auto compaction ──
+    var compactionModeEl = document.getElementById('compactionMode');
+    var compactionThresholdEl = document.getElementById('compactionThreshold');
+    var compactionKeepTurnsEl = document.getElementById('compactionKeepTurns');
+
+    function postCompaction() {
+      vscode.postMessage({
+        type: 'setCompaction',
+        config: {
+          mode: compactionModeEl.value,
+          threshold: parseInt(compactionThresholdEl.value, 10) || 300000,
+          keepTurns: parseInt(compactionKeepTurnsEl.value, 10) || 10
+        }
+      });
+    }
+    compactionModeEl.addEventListener('change', postCompaction);
+    compactionThresholdEl.addEventListener('change', postCompaction);
+    compactionKeepTurnsEl.addEventListener('change', postCompaction);
 
     // ── Tools tab ──
     var toolTogglesEl = document.getElementById('toolToggles');
@@ -1074,6 +1116,10 @@
         renderMcpList(msg.mcpServers || []);
         renderSessionList(msg.sessions || []);
         sessionsMaxAgeEl.value = msg.sessionsMaxAge || 0;
+        var comp = msg.compaction || {};
+        compactionModeEl.value = comp.mode || 'off';
+        compactionThresholdEl.value = comp.threshold || 300000;
+        compactionKeepTurnsEl.value = comp.keepTurns || 10;
       }
       if (msg.type === 'mcpStatus') {
         mcpStatuses = msg.statuses || {};

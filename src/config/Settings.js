@@ -24,6 +24,7 @@ const SESSIONS_MAX_AGE_KEY = "cce.sessionsMaxAge";
 const REASONING_EFFORT_KEY = "cce.reasoningEffort";
 const MCP_KEY = "cce.mcpServers";
 const API_KEY_PREFIX = "cce.apiKey.";
+const COMPACTION_KEY = "cce.compaction";
 
 /**
  * Must be called once during activate() with the extension context.
@@ -333,7 +334,41 @@ async function deleteExpiredSessions() {
  * @property {string} createdAt
  * @property {string} updatedAt
  * @property {Array<{ role: string, content: string | null }>} messages
+ * @property {string} [summary] - Rolling summary of compacted messages
+ * @property {number} [summaryTurns] - Number of user turns covered by the summary
  */
+
+/**
+ * @typedef {Object} CompactionSettings
+ * @property {"off"|"auto"|"ask"} mode
+ * @property {number} threshold - Trigger threshold in tokens
+ * @property {number} keepTurns - Number of recent user turns kept verbatim
+ */
+
+/**
+ * @returns {CompactionSettings}
+ */
+function getCompaction() {
+  const cfg = _ctx.globalState.get(COMPACTION_KEY, {});
+  return {
+    mode: cfg.mode === "auto" || cfg.mode === "ask" ? cfg.mode : "off",
+    threshold: typeof cfg.threshold === "number" && cfg.threshold > 0 ? cfg.threshold : 300000,
+    keepTurns: typeof cfg.keepTurns === "number" && cfg.keepTurns > 0 ? cfg.keepTurns : 10,
+  };
+}
+
+/**
+ * @param {Partial<CompactionSettings>} cfg
+ */
+async function setCompaction(cfg) {
+  const current = getCompaction();
+  const next = {
+    mode: cfg && (cfg.mode === "auto" || cfg.mode === "ask") ? cfg.mode : "off",
+    threshold: cfg && typeof cfg.threshold === "number" && cfg.threshold > 0 ? cfg.threshold : current.threshold,
+    keepTurns: cfg && typeof cfg.keepTurns === "number" && cfg.keepTurns > 0 ? cfg.keepTurns : current.keepTurns,
+  };
+  await _ctx.globalState.update(COMPACTION_KEY, next);
+}
 
 /**
  * @returns {string}
@@ -374,5 +409,5 @@ async function setMcpServers(servers) {
   await _ctx.globalState.update(MCP_KEY, servers);
 }
 
-module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getToolApprovalModes, setToolApprovalMode, getMcpApprovalModes, setMcpApprovalMode, clearMcpApprovalMode, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers };
+module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getToolApprovalModes, setToolApprovalMode, getMcpApprovalModes, setMcpApprovalMode, clearMcpApprovalMode, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers, getCompaction, setCompaction };
 

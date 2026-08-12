@@ -12,6 +12,8 @@ const { toolStatusSuffix } = require("./tools/statusText");
 const approval = require("./tools/approval");
 const { fetchMcpTools, callMcpTool } = require("./mcp/client");
 const processManager = require("./mcp/processManager");
+const { planCompaction } = require("./context/compact");
+const { formatTokenCount, estimateTextTokens, estimateMessageTokens } = require("./context/estimate");
 
 /**
  * @typedef {Object} ConversationMessage
@@ -43,6 +45,10 @@ class ChatViewProvider {
     this._currentSession = null;
     this._activeModel = Settings.getDefaultModel();
     this._reasoningEffort = Settings.getReasoningEffort() || "medium";
+    // Rolling summary of compacted older turns (auto-compaction), persisted
+    // on the session so it survives restart/switch.
+    this._summary = null;
+    this._summaryTurns = 0;
     // approvalId -> { resolve, timer, toolName } for pending approval requests
     this._pendingApprovals = new Map();
     // Tool names approved "for this session" (cleared on session change)
@@ -146,11 +152,15 @@ class ChatViewProvider {
 
   _restoreSession() {
     this._currentSession = Settings.getCurrentSessionId();
+    this._summary = null;
+    this._summaryTurns = 0;
     if (this._currentSession) {
       const sessions = Settings.getSessions();
       const session = sessions.find((s) => s.id === this._currentSession);
       if (session) {
         this._conversation = session.messages || [];
+        this._summary = session.summary || null;
+        this._summaryTurns = session.summaryTurns || 0;
       }
     }
   }
@@ -180,6 +190,8 @@ class ChatViewProvider {
 
     if (session) {
       session.messages = this._conversation;
+      session.summary = this._summary || undefined;
+      session.summaryTurns = this._summaryTurns || 0;
       session.updatedAt = new Date().toISOString();
       // Auto-title from first user message if still generic
       if (session.title && session.title.startsWith("Chat ")) {
@@ -198,6 +210,8 @@ class ChatViewProvider {
         createdAt: now,
         updatedAt: now,
         messages: this._conversation,
+        summary: this._summary || undefined,
+        summaryTurns: this._summaryTurns || 0,
       });
     }
 
@@ -225,6 +239,8 @@ class ChatViewProvider {
     // Start fresh — session will be persisted only when first message is sent
     this._currentSession = null;
     this._conversation = [];
+    this._summary = null;
+    this._summaryTurns = 0;
     Settings.setCurrentSessionId("");
     this._postSessions();
     if (this._view) {
@@ -249,6 +265,8 @@ class ChatViewProvider {
     this._currentSession = sessionId;
     Settings.setCurrentSessionId(sessionId);
     this._conversation = session.messages || [];
+    this._summary = session.summary || null;
+    this._summaryTurns = session.summaryTurns || 0;
     if (this._view) {
       this._view.webview.postMessage({ type: "sessionSwitched", sessionId });
       this._view.webview.postMessage({ type: "historyRestored", messages: this._conversation });
@@ -268,6 +286,8 @@ class ChatViewProvider {
       } else {
         this._currentSession = null;
         this._conversation = [];
+        this._summary = null;
+        this._summaryTurns = 0;
         Settings.setCurrentSessionId("");
         if (this._view) this._view.webview.postMessage({ type: "historyRestored", messages: [] });
       }
@@ -365,9 +385,51 @@ class ChatViewProvider {
         "do not retry the same tool call. Adapt your answer based on the information you already have.";
     }
 
+    // The abort controller is created up-front so the user's Stop button also
+    // cancels a compaction pass that may run before the main request.
+    this._abortController = new AbortController();
+
+    // Auto-compaction: fold older turns into a rolling summary when the
+    // estimated request size passes the configured threshold.
+    const compaction = Settings.getCompaction();
+    if (compaction.mode !== "off") {
+      const plan = planCompaction({
+        systemPrompt,
+        messages: this._conversation,
+        threshold: compaction.threshold,
+        keepTurns: compaction.keepTurns,
+        summary: this._summary,
+      });
+      if (plan.shouldCompact) {
+        log.appendLine(
+          "Compaction: estimate " + plan.estimate + " > threshold " + compaction.threshold +
+          ", folding " + plan.old.length + " messages"
+        );
+        let proceed = true;
+        if (compaction.mode === "ask") {
+          const choice = await vscode.window.showWarningMessage(
+            "Conversation is ~" + formatTokenCount(plan.estimate) +
+            " tokens — over your " + formatTokenCount(compaction.threshold) +
+            " compaction threshold. Compact older messages into a summary?",
+            { modal: false },
+            "Compact",
+            "Send anyway"
+          );
+          proceed = choice === "Compact";
+        }
+        if (proceed) {
+          await this._compact(plan, modelConfig, apiKey, provider);
+          // The user may have hit Stop during the compaction call.
+          if (this._abortController.signal.aborted) {
+            if (this._view) this._view.webview.postMessage({ type: "responseComplete", messageId });
+            return;
+          }
+        }
+      }
+    }
+
     const messages = this._convertToChatMessages(systemPrompt);
     log.appendLine("Sending " + tools.length + " total tools to model");
-    this._abortController = new AbortController();
 
     try {
       await this._chatLoop(messageId, messages, modelConfig, apiKey, provider, tools);
@@ -379,6 +441,86 @@ class ChatViewProvider {
       this._postError(messageId, err instanceof Error ? err.message : String(err));
     } finally {
       this._abortController = null;
+    }
+  }
+
+  /**
+   * Run a rolling-summary compaction: ask the model to fold the old turns
+   * into a summary, then trim the conversation to the recent turns. The
+   * summarization request only contains the previous summary plus the old
+   * turns, so it is always small. Never blocks the send — on any failure the
+   * conversation is left untouched and the request proceeds as-is.
+   * @param {import("./context/compact").CompactionPlan} plan
+   * @param {import("./config/Settings").ModelConfig} modelConfig
+   * @param {string} apiKey
+   * @param {import("./providers/registry").Provider} provider
+   * @returns {Promise<void>}
+   */
+  async _compact(plan, modelConfig, apiKey, provider) {
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    const signal = this._abortController ? this._abortController.signal : undefined;
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", onAbort);
+    }
+    // A stuck summarization must never block the send forever.
+    const timer = setTimeout(() => controller.abort(), 60000);
+
+    if (this._view) {
+      this._view.webview.postMessage({ type: "toolStatus", text: "Compacting conversation\u2026" });
+    }
+
+    try {
+      const result = await provider.chat(
+        /** @type {Array<import("./providers/openai").ChatMessage>} */ (plan.compactRequest),
+        modelConfig.modelId,
+        modelConfig.endpoint,
+        apiKey,
+        () => {}, // no streaming for the summary call
+        controller.signal,
+        undefined, // no tools — just summarize
+        undefined, // no thinking callback
+        "off" // cheap call: no reasoning
+      );
+      if (!result.text || !result.text.trim()) {
+        log.appendLine("Compaction: model returned an empty summary");
+        return;
+      }
+      const prevSummary = this._summary; // capture before overwriting
+      this._summary = result.text.trim();
+      const oldUserTurns = plan.old.filter((m) => m.role === "user").length;
+      this._summaryTurns += oldUserTurns;
+      this._conversation = plan.keep;
+      await this._saveSession();
+      // True token reduction: previous summary + folded turns − new summary.
+      const tokensSaved =
+        estimateTextTokens(prevSummary || "") +
+        plan.old.reduce((acc, m) => acc + estimateMessageTokens(m), 0) -
+        estimateTextTokens(this._summary);
+      log.appendLine("Compaction: summary now covers " + this._summaryTurns + " turns, conversation trimmed to " + plan.keep.length + " messages");
+      if (this._view) {
+        this._view.webview.postMessage({
+          type: "compactionNotice",
+          text:
+            "Compacted " + plan.old.length + " older message" + (plan.old.length > 1 ? "s" : "") +
+            " into a summary (~" + formatTokenCount(Math.max(0, tokensSaved)) +
+            " tokens saved). Details and images from before that point are summarized, not verbatim.",
+        });
+      }
+    } catch (e) {
+      if (!isAbortError(e)) {
+        log.appendLine("Compaction failed: " + (e instanceof Error ? e.message : String(e)));
+        if (this._view) {
+          this._view.webview.postMessage({
+            type: "compactionNotice",
+            text: "Compaction failed \u2014 sending without compacting. (" + (e instanceof Error ? e.message : String(e)) + ")",
+          });
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
     }
   }
 
@@ -687,6 +829,15 @@ class ChatViewProvider {
     const messages = [];
     if (systemPrompt.trim()) {
       messages.push({ role: "system", content: systemPrompt.trim() });
+    }
+    // The rolling summary of compacted older turns rides along as a second
+    // system message. Both providers accept it: Anthropic joins all system
+    // messages into its top-level `system` field, OpenAI passes them through.
+    if (this._summary) {
+      messages.push({
+        role: "system",
+        content: "Summary of earlier messages (older turns were compacted to save context — details and images from before that point are summarized, not verbatim):\n" + this._summary,
+      });
     }
     for (const m of this._conversation) {
       if (m.images && m.images.length > 0) {
