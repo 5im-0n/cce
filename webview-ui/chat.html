@@ -277,6 +277,7 @@
       border: 1px solid var(--vscode-input-border);
       margin-left: 24px;
       white-space: pre-wrap;
+      position: relative;
     }
     .message.assistant {
       margin-right: 24px;
@@ -288,6 +289,35 @@
       color: var(--vscode-inputValidation-errorForeground);
       margin: 0 24px 16px;
       white-space: pre-wrap;
+    }
+
+    /* ── edit button on the most recent user message ── */
+    .message.user.editable { padding-right: 34px; }
+    .message.user .edit-btn {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--vscode-descriptionForeground);
+      cursor: pointer;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .message.user:hover .edit-btn {
+      opacity: 0.7;
+      pointer-events: auto;
+    }
+    .message.user .edit-btn:hover {
+      opacity: 1;
+      background: var(--vscode-toolbar-hoverBackground);
+      color: var(--vscode-foreground);
     }
 
     /* ── markdown inside assistant messages ── */
@@ -382,6 +412,33 @@
       border: 1px solid var(--vscode-sideBarSectionHeader-border);
       border-radius: 6px;
     }
+
+    /* ── edit banner (editing a message in the composer) ── */
+    .edit-banner {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--vscode-inputValidation-warningForeground, #cca700);
+      background: var(--vscode-textBlockQuote-background);
+      border: 1px solid var(--vscode-inputValidation-warningBorder, #cca700);
+      border-radius: 6px;
+      padding: 6px 10px;
+      margin-bottom: 8px;
+    }
+    .edit-banner span { flex: 1; }
+    .edit-banner button {
+      background: transparent;
+      border: 1px solid var(--vscode-input-border);
+      color: var(--vscode-foreground);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      font-family: var(--vscode-font-family);
+      flex-shrink: 0;
+    }
+    .edit-banner button:hover { background: var(--vscode-toolbar-hoverBackground); }
 
     @keyframes dotPulse {
       0%, 80%, 100% { opacity: 0.3; }
@@ -623,6 +680,10 @@
   </div>
   <!-- ── input ── -->
   <div class="chat-input">
+    <div class="edit-banner" id="editBanner" style="display:none">
+      <span>Editing message — sending regenerates the reply from this point.</span>
+      <button id="cancelEditBtn">Cancel</button>
+    </div>
     <div class="image-preview-strip" id="imagePreviewStrip"></div>
     <textarea id="userInput" rows="1"
       placeholder="Ask a question... (Enter to send, Shift+Enter for newline)"></textarea>
@@ -666,6 +727,8 @@
     var closeSessions = document.getElementById("closeSessions");
     var attachBtn = document.getElementById("attachBtn");
     var imagePreviewStrip = document.getElementById("imagePreviewStrip");
+    var editBanner = document.getElementById("editBanner");
+    var cancelEditBtn = document.getElementById("cancelEditBtn");
 
     var CONFIGURE_VALUE = "__configure__";
     var currentModelId = "";
@@ -677,6 +740,10 @@
     var currentMode = null; // "thinking" | "text" | null
     var attachedImages = []; // [{ id, name, dataUrl, size, warning? }]
     var toolBoxes = {}; // toolId -> <details class="tool-call"> awaiting finalization
+    var editingId = null;   // id of the user message being edited (null = not editing)
+    var savedDraft = "";    // textarea content before entering edit mode
+    var savedImages = [];   // attachments before entering edit mode
+    var editPending = false; // true between pencil click and the host's editAccepted
 
     // ── scroll helpers ──
     function isNearBottom() {
@@ -705,14 +772,29 @@
     // ── send ──
     function sendMessage() {
       var t = textarea.value.trim();
-      if ((!t && attachedImages.length === 0) || isStreaming) return;
-      var mid = "msg-" + Date.now();
-      addMsg("user", t, mid, false, attachedImages.length > 0 ? attachedImages : undefined);
-      var payload = { type: "sendMessage", messageId: mid, text: t };
-      if (attachedImages.length > 0) {
-        payload.images = attachedImages.map(function(img) {
-          return { id: img.id, name: img.name, dataUrl: img.dataUrl, size: img.size };
-        });
+      if ((!t && attachedImages.length === 0) || isStreaming || editPending) return;
+      var payload;
+      if (editingId) {
+        // Edit confirm: the host replaces the message and regenerates from
+        // there. No local addMsg — the host's historyRestored rebuilds the
+        // transcript with the edited message in place.
+        payload = { type: "sendMessage", messageId: "msg-" + Date.now(), text: t, editingId: editingId };
+        if (attachedImages.length > 0) {
+          payload.images = attachedImages.map(function(img) {
+            return { id: img.id, name: img.name, dataUrl: img.dataUrl, size: img.size };
+          });
+        }
+        editingId = null;
+        hideEditBanner();
+      } else {
+        var mid = "msg-" + Date.now();
+        addMsg("user", t, mid, false, attachedImages.length > 0 ? attachedImages : undefined);
+        payload = { type: "sendMessage", messageId: mid, text: t };
+        if (attachedImages.length > 0) {
+          payload.images = attachedImages.map(function(img) {
+            return { id: img.id, name: img.name, dataUrl: img.dataUrl, size: img.size };
+          });
+        }
       }
       vscode.postMessage(payload);
       textarea.value = "";
@@ -722,6 +804,59 @@
       showThinking("Thinking");
       closeStream();
       setBusy(true);
+    }
+
+    // ── message editing ──
+    // Only the most recent user message is editable. Clicking its pencil loads
+    // the message (text + images) into the composer; sending confirms the
+    // edit and regenerates the reply, Cancel restores the previous draft.
+    function showEditBanner() {
+      editBanner.style.display = "flex";
+    }
+
+    function hideEditBanner() {
+      editBanner.style.display = "none";
+    }
+
+    function startEdit(id) {
+      if (isStreaming || !id || editPending) return;
+      savedDraft = textarea.value;
+      savedImages = attachedImages.slice();
+      editingId = id;
+      editPending = true;
+      showEditBanner();
+      vscode.postMessage({ type: "editMessage", id: id });
+    }
+
+    function cancelEdit() {
+      editingId = null;
+      editPending = false;
+      hideEditBanner();
+      textarea.value = savedDraft;
+      attachedImages = savedImages;
+      renderImagePreviews();
+      autoResize();
+      textarea.focus();
+    }
+
+    // Re-run whenever the transcript or streaming state changes: give the
+    // most recent user message a pencil (hidden while a response streams).
+    function refreshEditButtons() {
+      var els = messagesEl.querySelectorAll(".message.user");
+      els.forEach(function (el) {
+        el.classList.remove("editable");
+        var b = el.querySelector(".edit-btn");
+        if (b) b.remove();
+      });
+      if (isStreaming || els.length === 0) return;
+      var last = els[els.length - 1];
+      if (!last.dataset.msgId) return;
+      last.classList.add("editable");
+      var btn = document.createElement("button");
+      btn.className = "edit-btn";
+      btn.title = "Edit message";
+      btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M16.1 3.7L12.3.6c-.4-.4-1-.4-1.4 0L.4 12.2l-.3 3.4c0 .4.3.7.7.7l3.4-.3L16.1 5.1c.4-.4.4-1 0-1.4zM3.6 14.4l-2-.2-.2-2L9.3 4.3l2.2 2.2-7.9 7.9z"/></svg>';
+      last.appendChild(btn);
     }
 
     // ── message rendering ──
@@ -922,6 +1057,7 @@
         sendBtn.classList.remove("stop-btn");
         sendBtn.title = "Send";
       }
+      refreshEditButtons();
     }
 
     // ── model dropdown ──
@@ -957,6 +1093,13 @@
     }
 
     // ── event listeners ──
+    messagesEl.addEventListener("click", function (e) {
+      var btn = e.target.closest(".edit-btn");
+      if (!btn) return;
+      var el = btn.closest(".message.user");
+      if (el && el.dataset.msgId) startEdit(el.dataset.msgId);
+    });
+    cancelEditBtn.addEventListener("click", cancelEdit);
     textarea.addEventListener("input", autoResize);
     textarea.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -1022,6 +1165,9 @@
       } else if (m.type === "clearChat") {
         toolBoxes = {};
         stickToBottom = true;
+        editingId = null;
+        editPending = false;
+        hideEditBanner();
         messagesEl.innerHTML = '<div class="empty-state"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><div>Ask anything about your code</div></div>';
 
       } else if (m.type === "historyRestored") {
@@ -1030,6 +1176,9 @@
         hideThinking();
         toolBoxes = {};
         stickToBottom = true;
+        editingId = null;
+        editPending = false;
+        hideEditBanner();
         messagesEl.innerHTML = '';
         var msgs = m.messages || [];
         if (msgs.length === 0) {
@@ -1037,13 +1186,14 @@
         } else {
           msgs.forEach(function (msg) {
             if (msg.role === 'user') {
-              addMsg('user', msg.content, undefined, false, msg.images);
+              addMsg('user', msg.content, msg.id, false, msg.images);
             } else if (msg.role === 'assistant') {
               addMsg('assistant', msg.content);
             }
           });
           messagesEl.scrollTop = messagesEl.scrollHeight;
         }
+        refreshEditButtons();
 
       } else if (m.type === "thinkingDelta") {
         hideThinking();
@@ -1150,6 +1300,23 @@
         cancelPendingApprovalCards();
         setBusy(false);
         addMsg("error", "Error: " + m.error);
+      } else if (m.type === "editAccepted") {
+        // Host confirmed the edit: load the message into the composer.
+        editingId = m.id;
+        editPending = false;
+        textarea.value = m.content || "";
+        attachedImages = (m.images || []).slice();
+        renderImagePreviews();
+        autoResize();
+        showEditBanner();
+        textarea.focus();
+      } else if (m.type === "editRejected") {
+        // Stale webview state (e.g. the message is no longer the most recent
+        // or a response is streaming). Stay out of edit mode.
+        editingId = null;
+        editPending = false;
+        hideEditBanner();
+        addMsg("error", "Can't edit message: " + m.reason);
       } else if (m.type === "imagesAttached") {
         if (m.images && m.images.length > 0) {
           m.images.forEach(function(img) {

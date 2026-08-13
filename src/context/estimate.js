@@ -13,8 +13,9 @@
 /**
  * @typedef {Object} ConversationMessage
  * @property {string} role
- * @property {string | null} [content]
- * @property {Array<{ id: string, name: string, dataUrl: string, size: number }>} [images]
+ * @property {string | null} content
+ * @property {string} [id] - stable id on user messages, used by the edit feature
+ * @property {Array<{ id: string, name: string, dataUrl: string, size: number, warning: boolean }>} [images]
  */
 
 /**

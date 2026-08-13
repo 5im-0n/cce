@@ -14,11 +14,13 @@ const { fetchMcpTools, callMcpTool } = require("./mcp/client");
 const processManager = require("./mcp/processManager");
 const { planCompaction } = require("./context/compact");
 const { formatTokenCount, estimateTextTokens, estimateMessageTokens } = require("./context/estimate");
+const { applyEdit, lastUserMessageIndex } = require("./conversation/edit");
 
 /**
  * @typedef {Object} ConversationMessage
  * @property {string} role
  * @property {string | null} content
+ * @property {string} [id] - stable id on user messages, used by the edit feature
  * @property {Array<{ id: string, name: string, dataUrl: string, size: number, warning: boolean }>} [images]
  * @property {Array<{ id: string, type: string, function: { name: string, arguments: string } }>} [tool_calls]
  * @property {string} [tool_call_id]
@@ -105,7 +107,10 @@ class ChatViewProvider {
           this._postModels();
           break;
         case "sendMessage":
-          this._handleSendMessage(msg.messageId, msg.text, msg.images);
+          this._handleSendMessage(msg.messageId, msg.text, msg.images, msg.editingId);
+          break;
+        case "editMessage":
+          this._handleEditMessage(msg.id);
           break;
         case "cancelMessage":
           this._handleCancel();
@@ -159,10 +164,24 @@ class ChatViewProvider {
       const session = sessions.find((s) => s.id === this._currentSession);
       if (session) {
         this._conversation = session.messages || [];
+        this._ensureMessageIds();
         this._summary = session.summary || null;
         this._summaryTurns = session.summaryTurns || 0;
       }
     }
+  }
+
+  /**
+   * Assign stable ids to any user messages that lack one (sessions created
+   * before message ids existed), so the edit feature can reference them.
+   * Mutates this._conversation in place; ids are persisted on the next save.
+   */
+  _ensureMessageIds() {
+    this._conversation.forEach((m, i) => {
+      if (m.role === "user" && !m.id) {
+        m.id = "msg-" + Date.now() + "-" + i;
+      }
+    });
   }
 
   _ensureSession() {
@@ -265,6 +284,7 @@ class ChatViewProvider {
     this._currentSession = sessionId;
     Settings.setCurrentSessionId(sessionId);
     this._conversation = session.messages || [];
+    this._ensureMessageIds();
     this._summary = session.summary || null;
     this._summaryTurns = session.summaryTurns || 0;
     if (this._view) {
@@ -306,12 +326,50 @@ class ChatViewProvider {
   }
 
   /**
+   * Handle a request to start editing a message. Only the most recent user
+   * message is editable; anything else is rejected. The webview populates its
+   * composer from the returned content — the host is the source of truth, so
+   * stale webview state (e.g. after compaction) cannot edit a message the
+   * host no longer has.
+   * @param {string} id
+   */
+  _handleEditMessage(id) {
+    if (!this._view || !id) return;
+    if (this._abortController) {
+      this._view.webview.postMessage({
+        type: "editRejected",
+        id,
+        reason: "Wait for the current response to finish before editing.",
+      });
+      return;
+    }
+    const idx = lastUserMessageIndex(this._conversation);
+    if (idx < 0 || this._conversation[idx].id !== id) {
+      this._view.webview.postMessage({
+        type: "editRejected",
+        id,
+        reason: "Only the most recent message can be edited.",
+      });
+      return;
+    }
+    const msg = this._conversation[idx];
+    this._view.webview.postMessage({
+      type: "editAccepted",
+      id,
+      content: msg.content || "",
+      images: msg.images || [],
+    });
+  }
+
+  /**
    * @param {string} messageId
    * @param {string} text
    * @param {Array<{ id: string, name: string, dataUrl: string, size: number, warning: boolean }>} [images]
+   * @param {string} [editingId] - when set, this is an edit confirm: replace
+   *   the most recent user message with text/images and regenerate from there
    * @returns {Promise<void>}
    */
-  async _handleSendMessage(messageId, text, images) {
+  async _handleSendMessage(messageId, text, images, editingId) {
     const models = Settings.getModels();
     const modelConfig = models.find((m) => m.id === this._activeModel) || models[0];
     if (!modelConfig) {
@@ -326,8 +384,32 @@ class ChatViewProvider {
       this._postError(messageId, "Unknown provider: " + modelConfig.provider);
       return;
     }
-    this._conversation.push({ role: "user", content: text, images: images || [] });
-    this._ensureSession();
+    if (editingId) {
+      // Edit confirm: replace the most recent user message in place and drop
+      // everything after it (the old reply and any tool activity). The edit
+      // is persisted before the request runs, so an aborted regeneration
+      // still keeps the truncation. Pending approvals belonged to the turn
+      // being discarded, so they are rejected.
+      if (this._abortController) {
+        this._postError(messageId, "Wait for the current response to finish before editing.");
+        return;
+      }
+      const result = applyEdit(this._conversation, editingId, text, images || []);
+      if (!result.ok) {
+        this._postError(messageId, "Can't edit message: " + result.reason);
+        return;
+      }
+      this._rejectAllPendingApprovals("Message edited");
+      this._conversation = result.conversation;
+      this._ensureSession();
+      await this._saveSession();
+      if (this._view) {
+        this._view.webview.postMessage({ type: "historyRestored", messages: this._conversation });
+      }
+    } else {
+      this._conversation.push({ role: "user", content: text, images: images || [], id: messageId });
+      this._ensureSession();
+    }
 
     // Gather enabled tools
     let tools = getEnabledDefinitions(Settings.getToolSettings());
