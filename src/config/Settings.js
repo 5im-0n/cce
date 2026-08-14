@@ -350,6 +350,7 @@ async function deleteExpiredSessions() {
  * @returns {CompactionSettings}
  */
 function getCompaction() {
+  /** @type {Partial<CompactionSettings>} */
   const cfg = _ctx.globalState.get(COMPACTION_KEY, {});
   return {
     mode: cfg.mode === "auto" || cfg.mode === "ask" ? cfg.mode : "off",
