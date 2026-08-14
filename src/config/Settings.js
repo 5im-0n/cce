@@ -333,16 +333,17 @@ async function deleteExpiredSessions() {
  * @property {string} title
  * @property {string} createdAt
  * @property {string} updatedAt
- * @property {Array<{ role: string, content: string | null }>} messages
+ * @property {Array<import("../context/estimate").ConversationMessage>} messages
  * @property {string} [summary] - Rolling summary of compacted messages
  * @property {number} [summaryTurns] - Number of user turns covered by the summary
+ * @property {number} [summaryCoversUpTo] - Number of leading conversation messages covered by the summary (non-destructive compaction)
  */
 
 /**
  * @typedef {Object} CompactionSettings
  * @property {"off"|"auto"|"ask"} mode
  * @property {number} threshold - Trigger threshold in tokens
- * @property {number} keepTurns - Number of recent user turns kept verbatim
+ * @property {number} keepTurns - Number of recent user turns kept verbatim in the model view
  */
 
 /**

@@ -65,7 +65,8 @@ function buildSummaryRequest(summary, oldTurns) {
   body += "New conversation turns to fold into the summary:\n\n";
   for (const t of oldTurns) {
     const label = t.role === "user" ? "User" : "Assistant";
-    body += label + ": " + (t.content || "");
+    const content = typeof t.content === "string" ? t.content : "";
+    body += label + ": " + content;
     if (t.images && t.images.length > 0) {
       body += " [image attachment omitted — cannot be summarized]";
     }

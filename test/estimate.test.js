@@ -10,7 +10,9 @@ const {
   estimateTextTokens,
   estimateImageTokens,
   estimateMessageTokens,
+  estimateToolCallTokens,
   estimateRequestTokens,
+  estimateMessages,
   formatTokenCount,
 } = require("../src/context/estimate");
 
@@ -51,6 +53,36 @@ test("estimateMessageTokens sums text and all images", () => {
 test("estimateMessageTokens tolerates missing images field", () => {
   assert.equal(estimateMessageTokens({ role: "user", content: "abcd" }), 1);
   assert.equal(estimateMessageTokens({ role: "assistant", content: null }), 0);
+});
+
+test("estimateToolCallTokens counts arguments JSON plus a fixed overhead", () => {
+  assert.equal(estimateToolCallTokens({ function: { arguments: "abcd" } }), 1 + 4);
+  assert.equal(estimateToolCallTokens({ function: { arguments: "" } }), 0 + 4);
+  assert.equal(estimateToolCallTokens({}), 0 + 4);
+  assert.equal(estimateToolCallTokens({ function: {} }), 0 + 4);
+});
+
+test("estimateMessageTokens includes tool_calls arguments", () => {
+  const msg = {
+    role: "assistant",
+    content: null,
+    tool_calls: [
+      { id: "c1", type: "function", function: { name: "search_code", arguments: "abcd" } },
+      { id: "c2", type: "function", function: { name: "read_file", arguments: "wxyz" } },
+    ],
+  };
+  // each call: 1 token for args + 4 overhead
+  assert.equal(estimateMessageTokens(msg), (1 + 4) * 2);
+});
+
+test("estimateMessages sums across an array including system and tool messages", () => {
+  const messages = [
+    { role: "system", content: "abcd" }, // 1
+    { role: "user", content: "efgh" }, // 1
+    { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "t", arguments: "abcd" } }] }, // 5
+    { role: "tool", tool_call_id: "c1", content: "ijkl" }, // 1
+  ];
+  assert.equal(estimateMessages(messages), 8);
 });
 
 test("estimateRequestTokens sums system prompt, summary, and messages", () => {

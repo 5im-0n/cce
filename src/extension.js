@@ -14,16 +14,11 @@ const { fetchMcpTools, callMcpTool } = require("./mcp/client");
 const processManager = require("./mcp/processManager");
 const { planCompaction } = require("./context/compact");
 const { formatTokenCount, estimateTextTokens, estimateMessageTokens } = require("./context/estimate");
+const { computeBudget, pruneRounds, truncateToolResult, countToolCalls } = require("./context/guard");
 const { applyEdit, lastUserMessageIndex } = require("./conversation/edit");
 
 /**
- * @typedef {Object} ConversationMessage
- * @property {string} role
- * @property {string | null} content
- * @property {string} [id] - stable id on user messages, used by the edit feature
- * @property {Array<{ id: string, name: string, dataUrl: string, size: number, warning: boolean }>} [images]
- * @property {Array<{ id: string, type: string, function: { name: string, arguments: string } }>} [tool_calls]
- * @property {string} [tool_call_id]
+ * @typedef {import("./context/estimate").ConversationMessage} ConversationMessage
  */
 
 /**
@@ -51,6 +46,11 @@ class ChatViewProvider {
     // on the session so it survives restart/switch.
     this._summary = null;
     this._summaryTurns = 0;
+    // Index into _conversation of the first message NOT covered by the
+    // rolling summary. Compaction is non-destructive: the transcript keeps
+    // every message (the UI renders it all); only the model's view starts
+    // after this index.
+    this._summaryCoversUpTo = 0;
     // approvalId -> { resolve, timer, toolName } for pending approval requests
     this._pendingApprovals = new Map();
     // Tool names approved "for this session" (cleared on session change)
@@ -167,6 +167,7 @@ class ChatViewProvider {
         this._ensureMessageIds();
         this._summary = session.summary || null;
         this._summaryTurns = session.summaryTurns || 0;
+        this._summaryCoversUpTo = session.summaryCoversUpTo || 0;
       }
     }
   }
@@ -211,18 +212,19 @@ class ChatViewProvider {
       session.messages = this._conversation;
       session.summary = this._summary || undefined;
       session.summaryTurns = this._summaryTurns || 0;
+      session.summaryCoversUpTo = this._summaryCoversUpTo || 0;
       session.updatedAt = new Date().toISOString();
       // Auto-title from first user message if still generic
       if (session.title && session.title.startsWith("Chat ")) {
         const firstUser = this._conversation.find((m) => m.role === "user");
         if (firstUser) {
-          session.title = (firstUser.content || "").slice(0, 50).replace(/\n/g, " ");
+          session.title = (typeof firstUser.content === "string" ? firstUser.content : "").slice(0, 50).replace(/\n/g, " ");
         }
       }
     } else {
       const now = new Date().toISOString();
       const firstUser = this._conversation.find((m) => m.role === "user");
-      const title = firstUser ? (firstUser.content || "").slice(0, 50).replace(/\n/g, " ") : "Chat";
+      const title = firstUser ? (typeof firstUser.content === "string" ? firstUser.content : "").slice(0, 50).replace(/\n/g, " ") : "Chat";
       sessions.push({
         id: sessionId,
         title,
@@ -231,6 +233,7 @@ class ChatViewProvider {
         messages: this._conversation,
         summary: this._summary || undefined,
         summaryTurns: this._summaryTurns || 0,
+        summaryCoversUpTo: this._summaryCoversUpTo || 0,
       });
     }
 
@@ -260,6 +263,7 @@ class ChatViewProvider {
     this._conversation = [];
     this._summary = null;
     this._summaryTurns = 0;
+    this._summaryCoversUpTo = 0;
     Settings.setCurrentSessionId("");
     this._postSessions();
     if (this._view) {
@@ -287,6 +291,7 @@ class ChatViewProvider {
     this._ensureMessageIds();
     this._summary = session.summary || null;
     this._summaryTurns = session.summaryTurns || 0;
+    this._summaryCoversUpTo = session.summaryCoversUpTo || 0;
     if (this._view) {
       this._view.webview.postMessage({ type: "sessionSwitched", sessionId });
       this._view.webview.postMessage({ type: "historyRestored", messages: this._conversation });
@@ -308,6 +313,7 @@ class ChatViewProvider {
         this._conversation = [];
         this._summary = null;
         this._summaryTurns = 0;
+        this._summaryCoversUpTo = 0;
         Settings.setCurrentSessionId("");
         if (this._view) this._view.webview.postMessage({ type: "historyRestored", messages: [] });
       }
@@ -401,6 +407,10 @@ class ChatViewProvider {
       }
       this._rejectAllPendingApprovals("Message edited");
       this._conversation = result.conversation;
+      // Editing truncates the conversation; the summary must not reach past
+      // the new end. (The summary may now describe messages that were edited
+      // away — mildly stale, but harmless and keeps the compaction benefit.)
+      this._summaryCoversUpTo = Math.min(this._summaryCoversUpTo, this._conversation.length);
       this._ensureSession();
       await this._saveSession();
       if (this._view) {
@@ -472,12 +482,19 @@ class ChatViewProvider {
     this._abortController = new AbortController();
 
     // Auto-compaction: fold older turns into a rolling summary when the
-    // estimated request size passes the configured threshold.
+    // estimated request size passes the configured threshold. Non-destructive:
+    // the summary covers the leading `_summaryCoversUpTo` messages and the
+    // transcript itself is never trimmed, so only the un-summarized tail is
+    // considered here — already-summarized turns are never folded twice.
     const compaction = Settings.getCompaction();
+    // The loop guard derives its per-request budget from the same threshold:
+    // threshold minus a proportional output/reasoning reserve (OpenCode's
+    // formula), so a request is never sent when it would overflow.
+    const budget = computeBudget(compaction.threshold);
     if (compaction.mode !== "off") {
       const plan = planCompaction({
         systemPrompt,
-        messages: this._conversation,
+        messages: this._conversation.slice(this._summaryCoversUpTo),
         threshold: compaction.threshold,
         keepTurns: compaction.keepTurns,
         summary: this._summary,
@@ -514,7 +531,7 @@ class ChatViewProvider {
     log.appendLine("Sending " + tools.length + " total tools to model");
 
     try {
-      await this._chatLoop(messageId, messages, modelConfig, apiKey, provider, tools);
+      await this._chatLoop(messageId, messages, modelConfig, apiKey, provider, tools, budget);
     } catch (err) {
       if (isAbortError(err)) {
         if (this._view) this._view.webview.postMessage({ type: "responseComplete", messageId });
@@ -528,7 +545,7 @@ class ChatViewProvider {
 
   /**
    * Run a rolling-summary compaction: ask the model to fold the old turns
-   * into a summary, then trim the conversation to the recent turns. The
+   * into a summary, then advance the model-view boundary past them. The
    * summarization request only contains the previous summary plus the old
    * turns, so it is always small. Never blocks the send — on any failure the
    * conversation is left untouched and the request proceeds as-is.
@@ -573,21 +590,26 @@ class ChatViewProvider {
       this._summary = result.text.trim();
       const oldUserTurns = plan.old.filter((m) => m.role === "user").length;
       this._summaryTurns += oldUserTurns;
-      this._conversation = plan.keep;
+      // Non-destructive: keep the full transcript (the UI renders it all);
+      // only the model's view advances past the folded turns.
+      this._summaryCoversUpTo = Math.min(
+        this._summaryCoversUpTo + plan.old.length,
+        this._conversation.length
+      );
       await this._saveSession();
       // True token reduction: previous summary + folded turns − new summary.
       const tokensSaved =
         estimateTextTokens(prevSummary || "") +
         plan.old.reduce((acc, m) => acc + estimateMessageTokens(m), 0) -
         estimateTextTokens(this._summary);
-      log.appendLine("Compaction: summary now covers " + this._summaryTurns + " turns, conversation trimmed to " + plan.keep.length + " messages");
+      log.appendLine("Compaction: summary now covers " + this._summaryTurns + " turns (messages 0.." + this._summaryCoversUpTo + " of " + this._conversation.length + " summarized for the model)");
       if (this._view) {
         this._view.webview.postMessage({
           type: "compactionNotice",
           text:
             "Compacted " + plan.old.length + " older message" + (plan.old.length > 1 ? "s" : "") +
             " into a summary (~" + formatTokenCount(Math.max(0, tokensSaved)) +
-            " tokens saved). Details and images from before that point are summarized, not verbatim.",
+            " tokens saved). The model now sees a summary of the older part — your full transcript remains visible below.",
         });
       }
     } catch (e) {
@@ -613,10 +635,52 @@ class ChatViewProvider {
    * @param {string} apiKey
    * @param {import("./providers/registry").Provider} provider
    * @param {Array<import("./tools/definitions").ToolDefinition>} tools
+   * @param {number} [budget] - per-request token budget from the loop guard
    * @returns {Promise<void>}
    */
-  async _chatLoop(messageId, messages, modelConfig, apiKey, provider, tools) {
+  async _chatLoop(messageId, messages, modelConfig, apiKey, provider, tools, budget) {
     const signal = this._abortController ? this._abortController.signal : undefined;
+    if (signal && signal.aborted) {
+      // Stop button was hit between rounds — unwind cleanly instead of
+      // calling the provider with a dead signal.
+      if (this._view) this._view.webview.postMessage({ type: "responseComplete", messageId });
+      return;
+    }
+    // Loop guard: before EVERY model call (first send and each re-send),
+    // estimate the request and prune old tool rounds to fit the budget. If
+    // even that cannot fit, stop gracefully — a doomed request is never sent.
+    if (typeof budget === "number" && budget > 0) {
+      const guard = pruneRounds(messages, budget);
+      if (guard.droppedRounds > 0) {
+        log.appendLine("Loop guard: pruned " + guard.droppedRounds + " tool round(s) (~" + formatTokenCount(guard.freedTokens) + " tokens) to fit budget " + formatTokenCount(budget));
+      }
+      if (guard.overBudget) {
+        const rounds = messages.filter((m) => m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0).length;
+        const toolCounts = countToolCalls(messages);
+        const toolList = Object.keys(toolCounts).length
+          ? Object.entries(toolCounts).map(([n, c]) => n + " ×" + c).join(", ")
+          : "none";
+        const text =
+          "Context budget reached — I stopped before sending a request that would have exceeded it.\n\n" +
+          "Estimated request size: ~" + formatTokenCount(guard.estimate) + " tokens (budget: " + formatTokenCount(budget) + " tokens).\n" +
+          "Tool rounds executed: " + rounds + (toolList !== "none" ? " (" + toolList + ")" : "") + ".\n\n" +
+          "The results gathered so far are shown above. To continue, raise the compaction trigger threshold in settings, or split the request into smaller steps.";
+        this._conversation.push({ role: "assistant", content: text });
+        await this._saveSession();
+        if (this._view) {
+          this._view.webview.postMessage({ type: "partialResponse", messageId, text });
+          this._view.webview.postMessage({ type: "responseComplete", messageId });
+          this._view.webview.postMessage({
+            type: "contextStopped",
+            text:
+              "Context budget reached — stopped after " + rounds + " tool round" + (rounds === 1 ? "" : "s") +
+              " rather than sending an oversized request (~" + formatTokenCount(guard.estimate) +
+              " tokens vs " + formatTokenCount(budget) + " budget). Raise the compaction trigger threshold to allow larger requests.",
+          });
+        }
+        return;
+      }
+    }
     const result = await provider.chat(
       messages, modelConfig.modelId, modelConfig.endpoint, apiKey,
       (chunk) => { if (this._view) this._view.webview.postMessage({ type: "partialResponse", messageId, text: chunk }); },
@@ -669,7 +733,7 @@ class ChatViewProvider {
               toolResult = await callMcpTool(serverId, toolName, toolArgs);
             } else if (tc.function.name === "agent") {
               // Approving the agent call trusts everything its sub-agents do
-              toolResult = await this._runAgent(toolArgs, modelConfig, apiKey, provider);
+              toolResult = await this._runAgent(toolArgs, modelConfig, apiKey, provider, budget);
             } else {
               toolResult = await executeToolCall(
                 tc.function.name,
@@ -722,9 +786,9 @@ class ChatViewProvider {
           });
         }
 
-        messages.push({ role: "tool", tool_call_id: tc.id, content: toolResult });
+        messages.push({ role: "tool", tool_call_id: tc.id, content: truncateToolResult(toolResult) });
       }
-      await this._chatLoop(messageId, messages, modelConfig, apiKey, provider, tools);
+      await this._chatLoop(messageId, messages, modelConfig, apiKey, provider, tools, budget);
       return;
     }
 
@@ -749,9 +813,10 @@ class ChatViewProvider {
    * @param {import("./config/Settings").ModelConfig} modelConfig
    * @param {string} apiKey
    * @param {import("./providers/registry").Provider} provider
+   * @param {number} [budget] - per-request token budget from the loop guard
    * @returns {Promise<string>}
    */
-  async _runAgent(args, modelConfig, apiKey, provider) {
+  async _runAgent(args, modelConfig, apiKey, provider, budget) {
     const tasks = args.tasks || [];
     if (!tasks.length) return "No tasks provided.";
 
@@ -779,6 +844,18 @@ class ChatViewProvider {
 
         while (round < MAX_TOOL_ROUNDS) {
           round++;
+          // Loop guard: sub-agent requests accumulate their own tool rounds,
+          // so prune/stop against the same budget as the main loop.
+          if (typeof budget === "number" && budget > 0) {
+            const guard = pruneRounds(messages, budget);
+            if (guard.overBudget) {
+              const roundsDone = messages.filter((m) => m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0).length;
+              log.appendLine("Agent task " + (i + 1) + ": context budget reached after " + roundsDone + " rounds, returning partial result");
+              return "Task " + (i + 1) + " result (partial — context budget reached after " + roundsDone + " rounds):\n" +
+                "The next request would have used ~" + formatTokenCount(guard.estimate) + " tokens (budget " + formatTokenCount(budget) + ").\n" +
+                "Gathered so far (shown above). Raise the compaction trigger threshold for larger agent runs.";
+            }
+          }
           const result = await provider.chat(
             messages,
             modelConfig.modelId, modelConfig.endpoint, apiKey,
@@ -813,7 +890,7 @@ class ChatViewProvider {
                 toolArgs = {};
               }
 
-              messages.push({ role: "tool", tool_call_id: tc.id, content: String(toolResult) });
+              messages.push({ role: "tool", tool_call_id: tc.id, content: truncateToolResult(toolResult) });
             }
 
             // Continue the loop to let the model process tool results
@@ -826,6 +903,15 @@ class ChatViewProvider {
 
         // Exhausted max rounds — ask model for one final summary (no tools)
         log.appendLine("Agent task " + (i + 1) + ": max rounds reached, requesting final summary");
+        if (typeof budget === "number" && budget > 0) {
+          const guard = pruneRounds(messages, budget);
+          if (guard.overBudget) {
+            const roundsDone = messages.filter((m) => m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0).length;
+            return "Task " + (i + 1) + " result (partial — context budget reached after " + roundsDone + " rounds):\n" +
+              "The next request would have used ~" + formatTokenCount(guard.estimate) + " tokens (budget " + formatTokenCount(budget) + ").\n" +
+              "Gathered so far (shown above). Raise the compaction trigger threshold for larger agent runs.";
+          }
+        }
         const finalResult = await provider.chat(
           messages.concat([{ role: "user", content: "You have reached the maximum number of tool-calling rounds. Please provide your best answer now based on the information gathered so far. Do not call any more tools." }]),
           modelConfig.modelId, modelConfig.endpoint, apiKey,
@@ -915,17 +1001,20 @@ class ChatViewProvider {
     // The rolling summary of compacted older turns rides along as a second
     // system message. Both providers accept it: Anthropic joins all system
     // messages into its top-level `system` field, OpenAI passes them through.
-    if (this._summary) {
+    // Only the un-summarized tail of the transcript is sent (the summary
+    // stands in for everything before `_summaryCoversUpTo`).
+    if (this._summary && this._summaryCoversUpTo > 0) {
       messages.push({
         role: "system",
-        content: "Summary of earlier messages (older turns were compacted to save context — details and images from before that point are summarized, not verbatim):\n" + this._summary,
+        content: "Summary of earlier messages (older turns were compacted to save context — the model sees this summary of the older part; the full transcript remains visible in the chat):\n" + this._summary,
       });
     }
-    for (const m of this._conversation) {
+    for (let i = this._summaryCoversUpTo; i < this._conversation.length; i++) {
+      const m = this._conversation[i];
       if (m.images && m.images.length > 0) {
         /** @type {Array<import("./providers/openai").ContentPart>} */
         const content = [
-          { type: "text", text: m.content || "" },
+          { type: "text", text: typeof m.content === "string" ? m.content : "" },
           ...m.images.map((img) => /** @type {import("./providers/openai").ContentPart} */ ({ type: "image_url", image_url: { url: img.dataUrl } })),
         ];
         messages.push({ role: m.role, content });

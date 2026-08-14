@@ -11,11 +11,20 @@
  */
 
 /**
+ * @typedef {Object} ContentPart
+ * @property {"text" | "image_url"} [type]
+ * @property {string} [text]
+ * @property {{ url?: string }} [image_url]
+ */
+
+/**
  * @typedef {Object} ConversationMessage
  * @property {string} role
- * @property {string | null} content
+ * @property {string | Array<ContentPart> | null | undefined} [content]
  * @property {string} [id] - stable id on user messages, used by the edit feature
  * @property {Array<{ id: string, name: string, dataUrl: string, size: number, warning: boolean }>} [images]
+ * @property {Array<{ id: string, type?: string, function: { name: string, arguments: string } }>} [tool_calls] - tool-call payload on assistant messages
+ * @property {string} [tool_call_id] - which tool call a tool result answers
  */
 
 /**
@@ -47,15 +56,41 @@ function estimateImageTokens(image) {
 }
 
 /**
+ * Estimate the token count of a tool call: the JSON arguments text plus a
+ * small fixed overhead for the call envelope (id, name, role).
+ * @param {{ function?: { arguments?: string } }} tc
+ * @returns {number}
+ */
+function estimateToolCallTokens(tc) {
+  const args = tc && tc.function && typeof tc.function.arguments === "string" ? tc.function.arguments : "";
+  return estimateTextTokens(args) + 4;
+}
+
+/**
  * Estimate the token count of a single conversation message.
  * @param {ConversationMessage} msg
  * @returns {number}
  */
 function estimateMessageTokens(msg) {
-  let tokens = estimateTextTokens(msg.content || "");
+  let tokens = estimateTextTokens(typeof msg.content === "string" ? msg.content : "");
   for (const img of msg.images || []) {
     tokens += estimateImageTokens(img);
   }
+  for (const tc of msg.tool_calls || []) {
+    tokens += estimateToolCallTokens(tc);
+  }
+  return tokens;
+}
+
+/**
+ * Estimate the total token count of an array of chat messages (system prompt,
+ * conversation history, tool rounds).
+ * @param {ConversationMessage[]} messages
+ * @returns {number}
+ */
+function estimateMessages(messages) {
+  let tokens = 0;
+  for (const m of messages) tokens += estimateMessageTokens(m);
   return tokens;
 }
 
@@ -87,4 +122,4 @@ function formatTokenCount(n) {
   return String(n);
 }
 
-module.exports = { estimateTextTokens, estimateImageTokens, estimateMessageTokens, estimateRequestTokens, formatTokenCount };
+module.exports = { estimateTextTokens, estimateImageTokens, estimateMessageTokens, estimateToolCallTokens, estimateRequestTokens, estimateMessages, formatTokenCount };

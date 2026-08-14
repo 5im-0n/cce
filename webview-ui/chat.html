@@ -1274,6 +1274,13 @@
         notice.textContent = m.text;
         messagesEl.appendChild(notice);
         scrollToBottom();
+      } else if (m.type === "contextStopped") {
+        hideThinking();
+        var stopNotice = document.createElement("div");
+        stopNotice.className = "compaction-notice";
+        stopNotice.textContent = m.text;
+        messagesEl.appendChild(stopNotice);
+        scrollToBottom();
       } else if (m.type === "approvalRequest") {
         renderApprovalRequest(m);
       } else if (m.type === "partialResponse") {

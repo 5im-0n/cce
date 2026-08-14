@@ -435,7 +435,7 @@
 
     <h3>Auto Compaction</h3>
     <div class="api-key-hint" style="margin-bottom:12px">
-      When the estimated request size passes the threshold, older messages are folded into a summary so the conversation stays within the model's context window. Images in compacted messages are dropped.
+      When the estimated request size passes the threshold, older messages are summarized so the request stays within the model's context window. Your full transcript remains visible in the chat &mdash; only the model sees the summary. Images in summarized messages stop being sent to the model.
     </div>
     <div class="form-group">
       <label for="compactionMode">Mode</label>
@@ -448,10 +448,10 @@
     <div class="form-group">
       <label for="compactionThreshold">Trigger threshold (tokens)</label>
       <input type="number" id="compactionThreshold" min="1000" step="1000" placeholder="300000">
-      <div class="api-key-hint">Rough estimate, not exact. When exceeded, older messages get compacted.</div>
+      <div class="api-key-hint">Rough estimate, not exact. Every request is capped at this minus a 10% reserve for the model's reply: older tool results are trimmed first, and the loop stops early if it can't fit.</div>
     </div>
     <div class="form-group">
-      <label for="compactionKeepTurns">Keep recent turns verbatim</label>
+      <label for="compactionKeepTurns">Recent turns kept verbatim for the model</label>
       <input type="number" id="compactionKeepTurns" min="1" max="100" placeholder="10">
       <div class="api-key-hint">The most recent N user messages (and their replies) are never summarized.</div>
     </div>
