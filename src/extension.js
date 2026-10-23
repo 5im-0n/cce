@@ -580,7 +580,8 @@ class ChatViewProvider {
         controller.signal,
         undefined, // no tools — just summarize
         undefined, // no thinking callback
-        "off" // cheap call: no reasoning
+        "off", // no generated reasoning; explicit per-model parameters still apply
+        modelConfig.requestParameters
       );
       if (!result.text || !result.text.trim()) {
         log.appendLine("Compaction: model returned an empty summary");
@@ -687,7 +688,8 @@ class ChatViewProvider {
       signal,
       tools.length > 0 ? tools : undefined,
       (thinking) => { if (this._view) this._view.webview.postMessage({ type: "thinkingDelta", messageId, text: thinking }); },
-      this._reasoningEffort
+      this._reasoningEffort,
+      modelConfig.requestParameters
     );
 
     if (result.toolCalls && result.toolCalls.length > 0) {
@@ -863,7 +865,8 @@ class ChatViewProvider {
             new AbortController().signal,
             subTools.length > 0 ? subTools : undefined,
             undefined, // no thinking callback for sub-agents
-            this._reasoningEffort
+            this._reasoningEffort,
+            modelConfig.requestParameters
           );
 
           // If the model returned tool calls, execute them and loop
@@ -919,7 +922,8 @@ class ChatViewProvider {
           new AbortController().signal,
           undefined, // no tools available for final summary
           undefined, // no thinking callback for sub-agents
-          this._reasoningEffort
+          this._reasoningEffort,
+          modelConfig.requestParameters
         );
         return "Task " + (i + 1) + " result (max rounds reached):\n" + (finalResult.text || "(no output)");
       } catch (e) {

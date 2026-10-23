@@ -105,6 +105,7 @@ async function setApiKey(configId, key) {
  * @property {string} provider  - "openai" | "anthropic" | "ollama"
  * @property {string} modelId   - Actual model identifier (e.g. "gpt-4o")
  * @property {string} endpoint  - API base URL
+ * @property {Record<string, any>} [requestParameters] - Per-model JSON request-body overrides.
  */
 
 /**

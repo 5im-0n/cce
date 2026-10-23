@@ -1,4 +1,6 @@
 const log = require("../config/log").get();
+const ProviderError = require("./provider-error");
+const { applyRequestParameters } = require("./request-parameters");
 
 /**
  * @typedef {Object} ToolCall
@@ -63,16 +65,21 @@ const openaiProvider = {
    * @param {Array<ToolDefinition>} [tools] - OpenAI tool definitions
    * @param {function(string): void} [onThinking] - Called with reasoning/thinking tokens
    * @param {string} [reasoningEffort] - "off" | "low" | "medium" | "high" | "max"
+   * @param {Record<string, any>} [requestParameters] - Per-model API body overrides.
    * @returns {Promise<ChatResult>}
    */
-  async chat(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, reasoningEffort) {
+  async chat(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, reasoningEffort, requestParameters) {
     const hasReasoning = reasoningEffort && reasoningEffort !== "off";
 
-    if (hasReasoning) {
-      return this._chatResponses(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, reasoningEffort);
+    try {
+      if (hasReasoning) {
+        return await this._chatResponses(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, reasoningEffort, requestParameters);
+      }
+      return await this._chatCompletions(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, requestParameters);
+    } catch (err) {
+      if (err instanceof ProviderError || (err instanceof Error && err.name === "AbortError")) throw err;
+      throw new ProviderError(err instanceof Error ? err.message : String(err));
     }
-
-    return this._chatCompletions(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking);
   },
 
   // ───────────────────────────────
@@ -89,9 +96,10 @@ const openaiProvider = {
    * @param {AbortSignal} [signal]
    * @param {Array<ToolDefinition>} [tools]
    * @param {function(string): void} [onThinking]
+   * @param {Record<string, any>} [requestParameters] - Per-model API body overrides.
    * @returns {Promise<ChatResult>}
    */
-  async _chatCompletions(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking) {
+  async _chatCompletions(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, requestParameters) {
     const url = endpoint.replace(/\/+$/, "") + "/chat/completions";
 
     /** @type {Record<string, any>} */
@@ -114,7 +122,7 @@ const openaiProvider = {
     let response = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify(applyRequestParameters(body, requestParameters)),
       signal,
     });
 
@@ -292,9 +300,10 @@ const openaiProvider = {
    * @param {Array<ToolDefinition>} [tools]
    * @param {function(string): void} [onThinking]
    * @param {string} [reasoningEffort]
+   * @param {Record<string, any>} [requestParameters] - Per-model API body overrides.
    * @returns {Promise<ChatResult>}
    */
-  async _chatResponses(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, reasoningEffort) {
+  async _chatResponses(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, reasoningEffort, requestParameters) {
     const url = endpoint.replace(/\/+$/, "") + "/responses";
 
     // ── Convert messages ─────────────────
@@ -400,7 +409,7 @@ const openaiProvider = {
     let response = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify(applyRequestParameters(body, requestParameters)),
       signal,
     });
 
@@ -416,7 +425,7 @@ const openaiProvider = {
       // the standard chat endpoint) — the model may still reason internally.
       const hint =
         response.status === 400
-          ? '\n\n — Hint: this request was sent with the reasoning parameter enabled. Setting the Reasoning effort to "Off" stops sending that parameter (the request then uses the standard chat endpoint), which may avoid this 400 if the model rejects the reasoning request format. Note: "Off" only skips the parameter — the model may still reason internally on its own.'
+          ? '\n\n — Hint: this request was sent with the reasoning parameter enabled. Setting the Reasoning effort to "Off" stops sending that parameter (the request then uses the standard chat endpoint), which may avoid this 400 if the model rejects the reasoning request format. Note: "Off" only skips CCE-generated reasoning — explicit per-model request parameters still apply, and the model may still reason internally on its own.'
           : "";
       throw new ProviderError(
         `API error ${response.status}: ${response.statusText}${errText ? " — " + errText.slice(0, 500) : ""}${hint}`,
@@ -588,18 +597,5 @@ const openaiProvider = {
     return result;
   },
 };
-
-/**
- * Provider-level error.
- */
-class ProviderError extends Error {
-  /** @param {string} message @param {number} [status] @param {string} [body] */
-  constructor(message, status, body) {
-    super(message);
-    this.name = "ProviderError";
-    this.status = status;
-    this.body = body;
-  }
-}
 
 module.exports = openaiProvider;

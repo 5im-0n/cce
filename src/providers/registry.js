@@ -12,7 +12,7 @@ const anthropicProvider = require("./anthropic");
  * @typedef {Object} Provider
  * @property {string} id
  * @property {string} displayName
- * @property {(messages: import('./openai').ChatMessage[], modelId: string, endpoint: string, apiKey: string, onPartial: (text: string) => void, signal?: AbortSignal, tools?: import('../tools/definitions').ToolDefinition[], onThinking?: (text: string) => void, reasoningEffort?: string) => Promise<ChatResult>} chat
+ * @property {(messages: import('./openai').ChatMessage[], modelId: string, endpoint: string, apiKey: string, onPartial: (text: string) => void, signal?: AbortSignal, tools?: import('../tools/definitions').ToolDefinition[], onThinking?: (text: string) => void, reasoningEffort?: string, requestParameters?: Record<string, any>) => Promise<ChatResult>} chat
  */
 
 /**

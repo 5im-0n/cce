@@ -1,4 +1,6 @@
 const log = require("../config/log").get();
+const ProviderError = require("./provider-error");
+const { applyRequestParameters } = require("./request-parameters");
 
 /**
  * @typedef {Object} ToolCall
@@ -67,9 +69,33 @@ const anthropicProvider = {
    * @param {AbortSignal} [signal]
    * @param {Array<ToolDefinition>} [tools] - OpenAI-format tool definitions
    * @param {function(string): void} [onThinking] - Called with thinking/reasoning tokens
+   * @param {string} [reasoningEffort] - Reserved for the shared provider interface; use JSON thinking parameters here.
+   * @param {Record<string, any>} [requestParameters] - Per-model API body overrides.
    * @returns {Promise<ChatResult>}
    */
-  async chat(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking) {
+  async chat(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, reasoningEffort, requestParameters) {
+    try {
+      return await this._chatMessages(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, requestParameters);
+    } catch (err) {
+      if (err instanceof ProviderError || (err instanceof Error && err.name === "AbortError")) throw err;
+      throw new ProviderError(err instanceof Error ? err.message : String(err));
+    }
+  },
+
+  /**
+   * Build and send the Anthropic Messages request, then consume its SSE stream.
+   * @param {ChatMessage[]} messages
+   * @param {string} modelId
+   * @param {string} endpoint
+   * @param {string} apiKey
+   * @param {function(string): void} onPartial
+   * @param {AbortSignal} [signal]
+   * @param {Array<ToolDefinition>} [tools]
+   * @param {function(string): void} [onThinking]
+   * @param {Record<string, any>} [requestParameters]
+   * @returns {Promise<ChatResult>}
+   */
+  async _chatMessages(messages, modelId, endpoint, apiKey, onPartial, signal, tools, onThinking, requestParameters) {
     const url = endpoint.replace(/\/+$/, "") + "/messages";
 
     // ── 1. Extract system messages ──────────────────────────────
@@ -115,7 +141,7 @@ const anthropicProvider = {
     const response = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify(applyRequestParameters(body, requestParameters)),
       signal,
     });
 
@@ -354,18 +380,5 @@ const anthropicProvider = {
     };
   },
 };
-
-/**
- * Provider-level error with HTTP status.
- */
-class ProviderError extends Error {
-  /** @param {string} message @param {number} [status] @param {string} [body] */
-  constructor(message, status, body) {
-    super(message);
-    this.name = "ProviderError";
-    this.status = status;
-    this.body = body;
-  }
-}
 
 module.exports = anthropicProvider;

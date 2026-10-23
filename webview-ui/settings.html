@@ -391,7 +391,7 @@
       <div class="form-group">
         <label for="endpoint">API Endpoint</label>
         <input type="text" id="endpoint" placeholder="e.g. https://api.openai.com/v1" />
-        <div class="api-key-hint">For OpenAI-compatible endpoints that don't support the Responses API (vLLM, LiteLLM, local proxies), set the Reasoning effort to "Off" in the chat panel. "Off" only stops sending the reasoning parameter (the request then uses the standard chat endpoint) — the model may still reason internally on its own.</div>
+        <div class="api-key-hint">For OpenAI-compatible endpoints that don't support the Responses API (vLLM, LiteLLM, local proxies), set the Reasoning effort to "Off" in the chat panel. "Off" only stops CCE-generated reasoning parameters (the request then uses the standard chat endpoint). Explicit request JSON still applies, and the model may still reason internally on its own.</div>
       </div>
     </div>
     <div class="form-group">
@@ -399,6 +399,12 @@
       <input type="password" id="apiKey" placeholder="sk-..." />
       <div class="api-key-hint" id="apiKeyHint" style="display:none">Leave empty to keep the existing key.</div>
       <div class="api-key-hint" id="apiKeyOptional">Optional — leave empty for local models.</div>
+    </div>
+    <div class="form-group">
+      <label for="requestParameters">Request parameters (JSON, optional)</label>
+      <textarea id="requestParameters" rows="7" spellcheck="false" aria-describedby="requestParametersHint requestParametersError" placeholder='{"provider":{"quantizations":["fp16","bf16"]}}'></textarea>
+      <div class="api-key-hint" id="requestParametersHint">Saved per model and merged into every request, including sub-agents and compaction. Objects merge; arrays, scalars, and null replace values. Custom reasoning/thinking values override generated values unchanged. For OpenRouter or other /chat/completions endpoints, set Reasoning effort to "Off" in chat; explicit JSON parameters still apply. A non-Off effort selects /responses for OpenAI-compatible models. Compaction uses /chat/completions for OpenAI-compatible models, even if chat uses /responses; Responses-only options can make compaction fail. Explicit thinking may increase cost. CCE manages model, messages/input, system/instructions, tools/functions, streaming, and conversation references. This is request-body JSON only, not headers or secret storage.</div>
+      <div id="requestParametersError" role="alert" style="display:none; color:var(--vscode-errorForeground); margin-top:6px;"></div>
     </div>
     <div class="actions">
       <button class="btn-primary" id="saveBtn">Add Model</button>
@@ -564,6 +570,17 @@
     var modelIdEl = document.getElementById('modelId');
     var endpointEl = document.getElementById('endpoint');
     var apiKeyEl = document.getElementById('apiKey');
+    var requestParametersEl = document.getElementById('requestParameters');
+    var requestParametersErrorEl = document.getElementById('requestParametersError');
+    var modelSavePending = false;
+
+    /** Display model-save validation failures without clearing the editor. */
+    function showModelError(message) {
+      requestParametersErrorEl.textContent = message;
+      requestParametersErrorEl.style.display = message ? '' : 'none';
+    }
+
+    requestParametersEl.addEventListener('input', function () { showModelError(''); });
     var apiKeyHint = document.getElementById('apiKeyHint');
     var apiKeyOptional = document.getElementById('apiKeyOptional');
     var saveBtn = document.getElementById('saveBtn');
@@ -572,6 +589,7 @@
     var editingId = null;
 
     function setEditingMode(id, model) {
+      if (modelSavePending) return;
       editingId = id;
       formTitle.textContent = 'Edit Model';
       saveBtn.textContent = 'Save';
@@ -584,10 +602,14 @@
       modelIdEl.value = model.modelId;
       endpointEl.value = model.endpoint || '';
       apiKeyEl.value = '';
+      requestParametersEl.value = model.requestParameters && Object.keys(model.requestParameters).length
+        ? JSON.stringify(model.requestParameters, null, 2) : '';
+      showModelError('');
       displayNameEl.focus();
     }
 
     function setAddingMode() {
+      if (modelSavePending) return;
       editingId = null;
       formTitle.textContent = 'Add Model';
       saveBtn.textContent = 'Add Model';
@@ -600,6 +622,8 @@
       modelIdEl.value = '';
       endpointEl.value = '';
       apiKeyEl.value = '';
+      requestParametersEl.value = '';
+      showModelError('');
     }
 
     function renderModelList(models) {
@@ -669,14 +693,33 @@
     saveBtn.addEventListener('click', function () {
       var name = displayNameEl.value.trim();
       var mdlId = modelIdEl.value.trim();
-      if (!name || !mdlId) return;
+      if (!name || !mdlId || modelSavePending) return;
+
+      // Check syntax locally; the host authoritatively validates managed/unsafe keys.
+      var requestParameters = {};
+      try {
+        var json = requestParametersEl.value.trim();
+        if (json) requestParameters = JSON.parse(json);
+        if (!requestParameters || typeof requestParameters !== 'object' || Array.isArray(requestParameters)) {
+          throw new Error('Request parameters must be a JSON object.');
+        }
+      } catch (err) {
+        showModelError('Invalid request parameters: ' + err.message);
+        requestParametersEl.focus();
+        return;
+      }
+      showModelError('');
+      modelSavePending = true;
+      saveBtn.disabled = true;
+      cancelBtn.disabled = true;
 
       var config = {
         name: name,
         provider: providerEl.value,
         modelId: mdlId,
         endpoint: endpointEl.value.trim(),
-        apiKey: apiKeyEl.value.trim()
+        apiKey: apiKeyEl.value.trim(),
+        requestParameters: requestParameters
       };
 
       if (editingId) {
@@ -684,7 +727,7 @@
       } else {
         vscode.postMessage({ type: 'addModel', config: config });
       }
-      setAddingMode();
+      // Keep form contents until the host acknowledges a successful save.
     });
 
     cancelBtn.addEventListener('click', setAddingMode);
@@ -1105,6 +1148,13 @@
     window.addEventListener('message', function (e) {
       var msg = e.data;
       if (msg.type === 'dataLoaded') {
+        if (msg.modelSave && modelSavePending) {
+          modelSavePending = false;
+          saveBtn.disabled = false;
+          cancelBtn.disabled = false;
+          if (msg.modelSave.saved) setAddingMode();
+          else showModelError(msg.modelSave.error || 'Could not save model.');
+        }
         window._lastMcpServers = msg.mcpServers || [];
         window._lastMcpApprovalModes = msg.mcpApprovalModes || {};
         renderModelList(msg.models);

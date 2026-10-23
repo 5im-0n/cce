@@ -66,8 +66,53 @@ Add models via **Settings → Models**. Each model needs:
 | Model ID | API model identifier (e.g. `gpt-4o`, `claude-sonnet-4`) |
 | API Endpoint | Base URL (e.g. `https://api.openai.com/v1`) |
 | API Key | Optional — leave empty for local models |
+| Request parameters (JSON) | Optional per-model API request-body overrides |
 
 The first model added becomes the default.
+
+#### Custom request parameters
+
+Enter a JSON object in **Request parameters** to add API-specific options or
+replace generated parameter values. For example, OpenRouter provider routing:
+
+```json
+{
+  "provider": {
+    "quantizations": ["fp16", "bf16"]
+  }
+}
+```
+
+Custom reasoning/thinking values are sent with exactly the spelling you enter,
+without limiting them to the chat dropdown's presets. For an endpoint that
+expects `reasoning.effort`, an illustrative override is:
+
+```json
+{
+  "reasoning": {
+    "effort": "xHigh"
+  }
+}
+```
+
+Use the parameter names and values supported by your endpoint; CCE does not
+validate unknown options against an API schema. Nested objects merge (for
+example, overriding `reasoning.effort` retains the generated `reasoning.summary`);
+arrays and scalar values replace existing values. `null` is sent as JSON `null`,
+not treated as deletion. Clear the editor or enter `{}` to remove overrides.
+
+Parameters apply to every request for that model: normal chat, subsequent tool
+turns, sub-agents, and compaction. Explicit thinking parameters also apply during
+compaction and may increase cost. Compaction keeps generated reasoning Off, so
+OpenAI-compatible compaction requests use `/chat/completions` even when normal
+chat uses `/responses`; Responses-only options may be rejected during compaction.
+If compaction fails, the conversation is sent without compacting as before.
+Invalid JSON, unsafe object keys, and overrides
+of CCE-managed fields (`model`, `messages`, `input`, `system`, `instructions`,
+`tools`, `functions`, `stream`, `previous_response_id`, `conversation`, `prompt`)
+are rejected before saving or sending. This customizes the request body only;
+it does not change authentication, headers, or response parsing. These settings
+are not secret storage—keep API keys in the API Key field.
 
 ### Context
 

@@ -2,6 +2,7 @@ const vscode = require("vscode");
 const path = require("path");
 const fs = require("fs");
 const Settings = require("./Settings");
+const { parseRequestParameters } = require("../providers/request-parameters");
 const processManager = require("../mcp/processManager");
 const log = require("./log").get;
 
@@ -132,10 +133,15 @@ class ModelConfigPanel {
 
   // ── private ──────────────────────────────────────────────
 
-  static _postData() {
+  /**
+   * Send settings using the existing protocol, optionally acknowledging a model save.
+   * @param {{ saved?: boolean, error?: string }} [modelSave]
+   */
+  static _postData(modelSave) {
     if (!ModelConfigPanel._panel) return;
     ModelConfigPanel._panel.webview.postMessage({
       type: "dataLoaded",
+      modelSave,
       models: Settings.getModels(),
       systemPrompt: Settings.getSystemPrompt(),
       toolSettings: Settings.getToolSettings(),
@@ -177,14 +183,20 @@ class ModelConfigPanel {
    * @param {Omit<import('./Settings').ModelConfig, 'id'> & { apiKey?: string }} config
    */
   static async _addModel(config) {
-    const models = Settings.getModels();
-    const newModel = { id: ModelConfigPanel._uuid(), ...config };
-    models.push(newModel);
-    await Settings.setModels(models);
-    if (config.apiKey) await Settings.setApiKey(newModel.id, config.apiKey);
-    if (models.length === 1) await Settings.setDefaultModel(newModel.id);
-    ModelConfigPanel._postData();
-    if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
+    try {
+      const requestParameters = parseRequestParameters(config.requestParameters);
+      const models = Settings.getModels();
+      const { apiKey, ...model } = config; // Never persist or post API keys with model definitions.
+      const newModel = { ...model, id: ModelConfigPanel._uuid(), requestParameters };
+      if (apiKey) await Settings.setApiKey(newModel.id, apiKey);
+      models.push(newModel);
+      await Settings.setModels(models);
+      if (models.length === 1) await Settings.setDefaultModel(newModel.id);
+      ModelConfigPanel._postData({ saved: true });
+      if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
+    } catch (err) {
+      ModelConfigPanel._postData({ error: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   /**
@@ -192,17 +204,27 @@ class ModelConfigPanel {
    * @param {Partial<import('./Settings').ModelConfig> & { apiKey?: string }} config
    */
   static async _updateModel(configId, config) {
-    const models = Settings.getModels();
-    const idx = models.findIndex((m) => m.id === configId);
-    if (idx === -1) return;
-    if (config.name !== undefined) models[idx].name = config.name;
-    if (config.provider !== undefined) models[idx].provider = config.provider;
-    if (config.modelId !== undefined) models[idx].modelId = config.modelId;
-    if (config.endpoint !== undefined) models[idx].endpoint = config.endpoint;
-    await Settings.setModels(models);
-    if (config.apiKey) await Settings.setApiKey(configId, config.apiKey);
-    ModelConfigPanel._postData();
-    if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
+    try {
+      // Validate before changing the stored model or its API key.
+      const requestParameters = config.requestParameters === undefined
+        ? undefined : parseRequestParameters(config.requestParameters);
+      const models = Settings.getModels();
+      const idx = models.findIndex((m) => m.id === configId);
+      if (idx === -1) throw new Error("Model no longer exists. Reload settings and try again.");
+      const next = { ...models[idx] };
+      if (config.name !== undefined) next.name = config.name;
+      if (config.provider !== undefined) next.provider = config.provider;
+      if (config.modelId !== undefined) next.modelId = config.modelId;
+      if (config.endpoint !== undefined) next.endpoint = config.endpoint;
+      if (requestParameters !== undefined) next.requestParameters = requestParameters;
+      if (config.apiKey) await Settings.setApiKey(configId, config.apiKey);
+      models[idx] = next;
+      await Settings.setModels(models);
+      ModelConfigPanel._postData({ saved: true });
+      if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
+    } catch (err) {
+      ModelConfigPanel._postData({ error: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   /** @param {string} configId */
