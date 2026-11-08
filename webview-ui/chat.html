@@ -291,6 +291,26 @@
       white-space: pre-wrap;
     }
 
+    /* Copy controls stay outside selectable response/code text. */
+    .response-actions, .code-actions { display: flex; justify-content: flex-end; user-select: none; }
+    .response-actions { margin-bottom: 4px; }
+    .copy-btn {
+      padding: 3px 7px;
+      border: 1px solid var(--vscode-input-border, transparent);
+      border-radius: 4px;
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .copy-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .copy-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+    .copy-btn:disabled { cursor: default; opacity: 0.7; }
+    .copy-status { padding: 4px 12px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+    .copy-status.error { color: var(--vscode-errorForeground); }
+
     /* ── edit button on the most recent user message ── */
     .message.user.editable { padding-right: 34px; }
     .message.user .edit-btn {
@@ -678,6 +698,7 @@
       <div>Ask anything about your code</div>
     </div>
   </div>
+  <div id="copyStatus" class="copy-status" role="status" aria-live="polite" hidden></div>
   <!-- ── input ── -->
   <div class="chat-input">
     <div class="edit-banner" id="editBanner" style="display:none">
@@ -745,6 +766,143 @@
     var savedImages = [];   // attachments before entering edit mode
     var editPending = false; // true between pencil click and the host's editAccepted
 
+    // ── selection-safe rendering and clipboard ──
+    var deferredRenders = new Set();
+    var selectingTranscript = false;
+    var pendingCopies = new Map();
+    var copySequence = 0;
+    var latestCopyId = null;
+    var copyStatus = document.getElementById("copyStatus");
+
+    /** Whether a non-collapsed selection intersects an element (including cross-message selections). */
+    function selectionIntersects(el) {
+      var selection = window.getSelection();
+      if (!selection || selection.isCollapsed) return false;
+      for (var i = 0; i < selection.rangeCount; i++) {
+        if (selection.getRangeAt(i).intersectsNode(el)) return true;
+      }
+      return false;
+    }
+
+    /** Keep selected nodes, and focused code-copy buttons, alive until the user leaves them. */
+    function renderTranscriptContent(el) {
+      if (selectingTranscript || selectionIntersects(el) || el.contains(document.activeElement)) {
+        deferredRenders.add(el);
+        return;
+      }
+      deferredRenders.delete(el);
+      el.innerHTML = renderMD(el._rt || "");
+      addCodeCopyButtons(el);
+      if (el.classList.contains("tc") && !selectionIntersects(messagesEl)) el.scrollTop = el.scrollHeight;
+    }
+
+    /** Flush even after closeStream() has detached the current streaming reference. */
+    function flushDeferredRenders() {
+      deferredRenders.forEach(function (el) {
+        if (!messagesEl.contains(el)) deferredRenders.delete(el);
+        else renderTranscriptContent(el);
+      });
+    }
+
+    document.addEventListener("selectionchange", flushDeferredRenders);
+    messagesEl.addEventListener("pointerdown", function (e) {
+      if (e.button === 0) selectingTranscript = true;
+    });
+    function finishTranscriptSelection() {
+      selectingTranscript = false;
+      // Let click/copy handlers read the existing code text before replacing nodes.
+      setTimeout(flushDeferredRenders, 0);
+    }
+    document.addEventListener("pointerup", finishTranscriptSelection);
+    document.addEventListener("pointercancel", finishTranscriptSelection);
+    window.addEventListener("blur", finishTranscriptSelection);
+    messagesEl.addEventListener("focusout", function () { setTimeout(flushDeferredRenders, 0); });
+
+    /** Reset transient state when explicitly replacing the transcript. */
+    function resetTranscriptCopyState() {
+      deferredRenders.clear();
+      selectingTranscript = false;
+      pendingCopies.forEach(function (pending) { clearTimeout(pending.timer); });
+      pendingCopies.clear();
+      latestCopyId = null;
+      copyStatus.hidden = true;
+      copyStatus.textContent = "";
+    }
+
+    /** Request a host clipboard write; no success indication until its acknowledgement. */
+    function requestCopy(text, button) {
+      var requestId = "copy-" + Date.now().toString(36) + "-" + (++copySequence).toString(36);
+      latestCopyId = requestId;
+      var label = button.textContent;
+      button.disabled = true;
+      button.textContent = "Copying…";
+      copyStatus.hidden = false;
+      copyStatus.classList.remove("error");
+      copyStatus.textContent = "Copying…";
+      var timer = setTimeout(function () {
+        finishCopy({ requestId: requestId, ok: false, error: "No clipboard confirmation received. Please try again." });
+      }, 10000);
+      pendingCopies.set(requestId, { button: button, label: label, timer: timer });
+      vscode.postMessage({ type: "copyText", requestId: requestId, text: text });
+    }
+
+    /** Correlate acknowledgements; stale replies cannot overwrite newer feedback. */
+    function finishCopy(result) {
+      var pending = pendingCopies.get(result.requestId);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      pendingCopies.delete(result.requestId);
+      pending.button.disabled = false;
+      pending.button.textContent = pending.label;
+      if (latestCopyId !== result.requestId) return;
+      copyStatus.hidden = false;
+      copyStatus.classList.toggle("error", !result.ok);
+      copyStatus.textContent = result.ok ? "Copied" : (result.error || "Could not copy. Please try again.");
+    }
+
+    /** Build a keyboard-accessible copy control without embedding response text in HTML/attributes. */
+    function createCopyButton(label, getText) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "copy-btn";
+      button.textContent = label;
+      button.addEventListener("click", function () { requestCopy(getText(), button); });
+      return button;
+    }
+
+    /** Code text is read before/without UI labels, preserving whitespace and decoded entities. */
+    function addCodeCopyButtons(content) {
+      content.querySelectorAll("pre > code").forEach(function (code) {
+        var pre = code.parentElement;
+        var wrapper = document.createElement("div");
+        wrapper.className = "code-block";
+        var actions = document.createElement("div");
+        actions.className = "code-actions";
+        actions.appendChild(createCopyButton("Copy code", function () { return code.textContent; }));
+        pre.replaceWith(wrapper);
+        wrapper.appendChild(actions);
+        wrapper.appendChild(pre);
+      });
+    }
+
+    /** Keep the response action stable while only its Markdown content is re-rendered. */
+    function renderAssistant(el) {
+      var content = el.querySelector(".message-content");
+      if (!content) {
+        var actions = document.createElement("div");
+        actions.className = "response-actions";
+        var button = createCopyButton("Copy response", function () { return el._rt || ""; });
+        button.title = "Copy response as Markdown (text received so far while streaming)";
+        actions.appendChild(button);
+        content = document.createElement("div");
+        content.className = "message-content";
+        el.appendChild(actions);
+        el.appendChild(content);
+      }
+      content._rt = el._rt;
+      renderTranscriptContent(content);
+    }
+
     // ── scroll helpers ──
     function isNearBottom() {
       var threshold = 50;
@@ -758,7 +916,7 @@
     var stickToBottom = true;
 
     function scrollToBottom() {
-      if (stickToBottom) {
+      if (stickToBottom && !selectingTranscript && !selectionIntersects(messagesEl)) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
     }
@@ -866,14 +1024,14 @@
 
       if (append && streamingEl) {
         streamingEl._rt = (streamingEl._rt || "") + text;
-        streamingEl.innerHTML = renderMD(streamingEl._rt);
+        renderAssistant(streamingEl);
       } else {
         var el = document.createElement("div");
         el.className = "message " + role;
         if (msgId) el.dataset.msgId = msgId;
         if (role === "assistant") {
           el._rt = text;
-          el.innerHTML = renderMD(text);
+          renderAssistant(el);
           streamingEl = el;
           streamingMsgId = msgId;
         } else {
@@ -1156,13 +1314,19 @@
     window.addEventListener("message", function (e) {
       var m = e.data;
 
-      if (m.type === "modelsLoaded") {
+      if (m.type === "copyResult") {
+        finishCopy(m);
+
+      } else if (m.type === "modelsLoaded") {
         populateModels(m.models, m.activeModel, m.reasoningEffort);
 
       } else if (m.type === "sessionsLoaded") {
         renderSessions(m.sessions, m.currentSessionId);
 
       } else if (m.type === "clearChat") {
+        resetTranscriptCopyState();
+        closeStream();
+        hideThinking();
         toolBoxes = {};
         stickToBottom = true;
         editingId = null;
@@ -1172,6 +1336,7 @@
 
       } else if (m.type === "historyRestored") {
         // Clear and rebuild all messages
+        resetTranscriptCopyState();
         closeStream();
         hideThinking();
         toolBoxes = {};
@@ -1209,8 +1374,7 @@
         }
         var tc = streamingEl.querySelector(".tc");
         tc._rt = (tc._rt || "") + m.text;
-        tc.innerHTML = renderMD(tc._rt);
-        tc.scrollTop = tc.scrollHeight;
+        renderTranscriptContent(tc);
         scrollToBottom();
       } else if (m.type === "toolStart") {
         // Open the tool box immediately: name, args, and a "Running …" line
@@ -1229,7 +1393,7 @@
         // Opening a box expands it below the fold: bring it (and whatever
         // follows it) into view instead of leaving the view stuck.
         tc.addEventListener("toggle", function () {
-          if (tc.open) tc.scrollIntoView({ block: "nearest" });
+          if (tc.open && !selectingTranscript && !selectionIntersects(messagesEl)) tc.scrollIntoView({ block: "nearest" });
         });
         scrollToBottom();
       } else if (m.type === "toolDelta") {
@@ -1261,7 +1425,7 @@
             "<div class='tool-body result'>" + escH(m.result || "(no output)") + "</div>";
           messagesEl.appendChild(tc);
           tc.addEventListener("toggle", function () {
-            if (tc.open) tc.scrollIntoView({ block: "nearest" });
+            if (tc.open && !selectingTranscript && !selectionIntersects(messagesEl)) tc.scrollIntoView({ block: "nearest" });
           });
         }
         scrollToBottom();
@@ -1294,7 +1458,7 @@
           currentMode = "text";
         }
         streamingEl._rt = (streamingEl._rt || "") + m.text;
-        streamingEl.innerHTML = renderMD(streamingEl._rt);
+        renderAssistant(streamingEl);
         scrollToBottom();
       } else if (m.type === "responseComplete") {
         closeStream();

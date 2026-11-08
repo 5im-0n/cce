@@ -118,6 +118,11 @@ class ChatViewProvider {
         case "attachImage":
           this._handleAttachImage();
           break;
+        case "copyText":
+          // Reply to the originating webview, even if the view is recreated
+          // while the clipboard operation is in flight.
+          void this._handleCopyText(msg, webviewView.webview);
+          break;
         case "newSession":
           this._newSession();
           break;
@@ -139,6 +144,35 @@ class ChatViewProvider {
           break;
       }
     });
+  }
+
+  /**
+   * Validate a webview copy request and acknowledge only after VS Code writes
+   * the clipboard. Never echo clipboard text or raw platform errors to the UI.
+   * @param {{ requestId?: unknown, text?: unknown }} msg
+   * @param {vscode.Webview} webview The originating webview.
+   * @returns {Promise<void>}
+   */
+  async _handleCopyText(msg, webview) {
+    if (typeof msg.requestId !== "string" || !/^copy-[a-z0-9-]{1,80}$/.test(msg.requestId)) return;
+    let error;
+    // Bound IPC payloads; empty/invalid requests must not clear the clipboard.
+    if (typeof msg.text !== "string" || msg.text.length === 0 || msg.text.length > 10 * 1024 * 1024) {
+      error = "Nothing to copy, or the text exceeds the 10,485,760-character limit.";
+    } else {
+      try {
+        await vscode.env.clipboard.writeText(msg.text);
+      } catch {
+        log.appendLine("Clipboard write failed");
+        error = "Could not write to the clipboard. Please try again.";
+      }
+    }
+    try {
+      await webview.postMessage({ type: "copyResult", requestId: msg.requestId, ok: !error, error });
+    } catch {
+      // The originating webview may have been disposed during the write.
+      log.appendLine("Clipboard result could not be delivered to the webview");
+    }
   }
 
   _postModels() {
