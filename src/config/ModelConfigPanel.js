@@ -10,22 +10,83 @@ const log = require("./log").get;
  * Manages the CCE Settings webview panel — tabbed UI with
  * "Models", "Context", "Tools", and "MCP" tabs.
  * Opens as a modal-like editor tab.
+ *
+ * Several chats can be open at once, so model/approval changes are broadcast
+ * to every listener instead of notifying a single callback.
  */
 class ModelConfigPanel {
   /** @type {vscode.WebviewPanel | null} */
   static _panel = null;
 
-  /** @type {(() => void) | null} */
-  static _onChanged = null;
+  /** @type {Set<() => void>} */
+  static _listeners = new Set();
+
+  /**
+   * Register a callback invoked after models are saved/deleted. Listeners are
+   * kept across panel open/close, so they must be safe to call at any time.
+   * Re-registering the same function is a no-op.
+   * @param {() => void} listener
+   * @returns {() => void} Unregister function.
+   */
+  static addListener(listener) {
+    ModelConfigPanel._listeners.add(listener);
+    return () => ModelConfigPanel._listeners.delete(listener);
+  }
+
+  /** @param {() => void} listener */
+  static removeListener(listener) {
+    ModelConfigPanel._listeners.delete(listener);
+  }
+
+  /** @type {Set<(sessionId: string) => void>} */
+  static _sessionListeners = new Set();
+
+  /**
+   * Register a callback invoked after a session is deleted or expired from the
+   * settings panel, so open chats can drop it before their next save
+   * resurrects it.
+   * @param {(sessionId: string) => void} listener
+   * @returns {() => void} Unregister function.
+   */
+  static addSessionListener(listener) {
+    ModelConfigPanel._sessionListeners.add(listener);
+    return () => ModelConfigPanel._sessionListeners.delete(listener);
+  }
+
+  /**
+   * @param {string} sessionId
+   */
+  static _notifySessionDeleted(sessionId) {
+    for (const listener of Array.from(ModelConfigPanel._sessionListeners)) {
+      try {
+        listener(sessionId);
+      } catch (e) {
+        log().appendLine("Session listener failed: " + (e instanceof Error ? e.message : String(e)));
+      }
+    }
+  }
+
+  /** Notify every registered chat that the model list changed. */
+  static _notifyChanged() {
+    for (const listener of Array.from(ModelConfigPanel._listeners)) {
+      try {
+        listener();
+      } catch (e) {
+        log().appendLine("Model change listener failed: " + (e instanceof Error ? e.message : String(e)));
+      }
+    }
+  }
 
   /**
    * Create the panel if not already open, or reveal it.
    * @param {vscode.ExtensionContext} context
-   * @param {function(): void} onChanged - called after models are saved/deleted
+   * @param {(() => void)} [onChanged] - optional extra listener for this caller
    */
   static createOrShow(context, onChanged) {
     const vscode = require("vscode");
     const column = vscode.ViewColumn.Active;
+
+    if (onChanged) ModelConfigPanel.addListener(onChanged);
 
     log().appendLine("createOrShow called, existing panel: " + !!ModelConfigPanel._panel);
 
@@ -45,7 +106,6 @@ class ModelConfigPanel {
     );
 
     ModelConfigPanel._panel = panel;
-    ModelConfigPanel._onChanged = onChanged;
 
     // Set the CCE icon on the tab
     panel.iconPath = vscode.Uri.joinPath(context.extensionUri, "resources", "icon.png");
@@ -193,7 +253,7 @@ class ModelConfigPanel {
       await Settings.setModels(models);
       if (models.length === 1) await Settings.setDefaultModel(newModel.id);
       ModelConfigPanel._postData({ saved: true });
-      if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
+      ModelConfigPanel._notifyChanged();
     } catch (err) {
       ModelConfigPanel._postData({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -221,7 +281,7 @@ class ModelConfigPanel {
       models[idx] = next;
       await Settings.setModels(models);
       ModelConfigPanel._postData({ saved: true });
-      if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
+      ModelConfigPanel._notifyChanged();
     } catch (err) {
       ModelConfigPanel._postData({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -237,7 +297,7 @@ class ModelConfigPanel {
       await Settings.setDefaultModel(models.length > 0 ? models[0].id : "");
     }
     ModelConfigPanel._postData();
-    if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
+    ModelConfigPanel._notifyChanged();
   }
 
   /**
@@ -256,7 +316,7 @@ class ModelConfigPanel {
     models.splice(target, 0, moved);
     await Settings.setModels(models);
     ModelConfigPanel._postData();
-    if (ModelConfigPanel._onChanged) ModelConfigPanel._onChanged();
+    ModelConfigPanel._notifyChanged();
   }
 
   /**
@@ -354,11 +414,19 @@ class ModelConfigPanel {
   /** @param {string} sessionId @param {"global"|"workspace"} scope */
   static async _deleteSession(sessionId, scope) {
     await Settings.deleteSession(sessionId, scope);
+    ModelConfigPanel._notifySessionDeleted(sessionId);
     ModelConfigPanel._postData();
   }
 
   static async _deleteExpiredSessions() {
+    // Collect the ids that disappear so open chats can drop them; a chat that
+    // keeps a deleted session in memory would write it back on its next save.
+    const before = new Set(Settings.getAllSessions().map((s) => s.id));
     await Settings.deleteExpiredSessions();
+    const after = new Set(Settings.getAllSessions().map((s) => s.id));
+    for (const id of before) {
+      if (!after.has(id)) ModelConfigPanel._notifySessionDeleted(id);
+    }
     ModelConfigPanel._postData();
   }
 

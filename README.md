@@ -20,6 +20,7 @@ A minimal, transparent VSCode chat interface for LLMs. **You decide what gets se
 - **MCP servers** — Model Context Protocol support for external tools (web search, APIs)
 - **Agent tool** — spawn parallel sub-agents for independent tasks
 - **Sessions** — persistent conversation history with full session management
+- **Parallel chats** — open several chats at once (sidebar + editor tabs), each with its own conversation, model and approvals
 - **Config panel** — tabbed settings UI for models, context, tools, and MCP servers
 - **API keys in OS keychain** — stored via VSCode `SecretStorage` (Windows Credential Manager, macOS Keychain, Linux libsecret)
 
@@ -154,11 +155,23 @@ Every tool call is gated by an approval policy before it executes:
 - **MCP approval is server-level.** An Auto / Ask / Deny dropdown on each server card in **Settings → MCP** applies to *every* tool that server exposes. Per-tool and per-session overrides do not apply to MCP tools; a stale per-tool entry is ignored.
 - Approving the **Agent** tool trusts everything its sub-agents do (they run without further prompts).
 - Pending requests are **auto-denied** after 5 minutes, and denied immediately if you cancel the message, switch sessions, or close the chat.
+- Approvals are **per chat**: a card answered in one tab never releases a tool call in another. "Always allow" is global (it changes the tool's policy in Settings → Tools); "Allow for this session" covers only the chat you answered in.
+- Approvals are not inherited by chats opened afterwards: a new tab starts from the configured policies again.
 - Per-tool overrides (Auto / Ask / Deny) are available in **Settings → Tools**, next to each tool toggle.
 
 ### MCP Servers
 
 Add Model Context Protocol servers via **Settings → MCP**. Each server needs a **URL** and optional custom **headers**. Toggle servers on/off per-session.
+
+### Parallel Chats
+
+More than one conversation can run at the same time. The sidebar chat is the default; open additional ones in editor tabs with **CCE: New Chat Tab** (the `+` button in the chat header, the `↗` button next to any session, or the command palette). Drag the tabs wherever you like — one tab on the login flow, another on a report.
+
+- Each chat has **its own conversation, session, model, reasoning effort, Stop button and approval cards** — answering an approval in one tab can never release a tool call in another.
+- A session is shown by **one chat at a time**. Opening a session that another tab already has reveals that tab instead of forking the transcript; the session list marks such sessions.
+- **Closing a tab aborts its in-flight request**, denies pending approvals and saves the transcript. The session can then be reopened anywhere.
+- Chats share the workspace, so they can touch the same files. When another chat is modifying the same file (or running a command) at the moment you are asked to approve a tool, the approval card **warns you** — nothing is blocked, you decide. Context comes from the editor, though: `get_selection` reads the *active* editor, whichever chat asked.
+- Model and reasoning effort are remembered per session: reopen a session and it comes back with the model you were using. Picking a model in any chat also updates the default for new chats.
 
 ## Keyboard Shortcuts
 
@@ -173,6 +186,7 @@ Add Model Context Protocol servers via **Settings → MCP**. Each server needs a
 - Webview never sees API keys
 - `run_command` and `delete_files` are available but disabled by default — enable them explicitly in Settings → Tools
 - Mutating, shell, and MCP tools require inline user approval before executing (see **Tool Approval** above)
+- Approval cards are answered per chat: one tab cannot approve a tool call for another
 - Sub-agents are blocked from spawning more sub-agents (no recursive agent explosion)
 
 ## License

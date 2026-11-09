@@ -1,4 +1,5 @@
 const vscode = require("vscode");
+const sessionStore = require("./sessionStore");
 
 /**
  * Persistent config backed by VSCode globalState (model definitions, tools, etc.)
@@ -234,11 +235,23 @@ function getSessions() {
   return _getMemento().get(SESSIONS_KEY, []);
 }
 
+// NOTE: there is deliberately no `setSessions(wholeArray)` writer. Several
+// chats can save at the same time, and a blind whole-array write would drop
+// another chat's save (or resurrect a session it deleted). Every writer goes
+// through `mutateSessions`, which serializes the read-modify-write.
+
 /**
- * @param {Session[]} sessions
+ * Serialized read-modify-write over the stored session array.
+ *
+ * Every writer (any chat saving its own session, the settings panel deleting
+ * one, expiry cleanup) goes through this queue so concurrent saves cannot drop
+ * one another's writes — the whole array is rewritten on each save.
+ *
+ * @param {(sessions: Session[]) => (Session[] | void)} fn - Mutate in place or return a new array.
+ * @returns {Promise<Session[]>} The persisted array.
  */
-async function setSessions(sessions) {
-  await _getMemento().update(SESSIONS_KEY, sessions);
+function mutateSessions(fn) {
+  return sessionStore.mutateSessions(_getMemento(), SESSIONS_KEY, fn);
 }
 
 /**
@@ -297,11 +310,12 @@ function getAllSessions() {
  * @param {"global"|"workspace"} scope
  */
 async function deleteSession(sessionId, scope) {
-  const storage = scope === "workspace" ? _ctx.workspaceState : _ctx.globalState;
-  /** @type {Session[]} */
-  let sessions = storage.get(SESSIONS_KEY, []) || [];
-  sessions = sessions.filter((s) => s.id !== sessionId);
-  await storage.update(SESSIONS_KEY, sessions);
+  const memento = scope === "workspace" ? _ctx.workspaceState : _ctx.globalState;
+  await sessionStore.mutateSessions(memento, SESSIONS_KEY, (sessions) => {
+    const remaining = sessions.filter((s) => s.id !== sessionId);
+    sessions.length = 0;
+    sessions.push(...remaining);
+  });
 }
 
 /**
@@ -311,20 +325,19 @@ async function deleteExpiredSessions() {
   const maxAge = getSessionsMaxAge();
   if (maxAge <= 0) return;
   const cutoff = Date.now() - maxAge * 86400000;
+  const keep = (sessions) => {
+    const remaining = sessions.filter((s) => new Date(s.updatedAt).getTime() >= cutoff);
+    sessions.length = 0;
+    sessions.push(...remaining);
+  };
 
   // Global sessions
-  /** @type {Session[]} */
-  let globalSessions = _ctx.globalState.get(SESSIONS_KEY, []) || [];
-  globalSessions = globalSessions.filter((s) => new Date(s.updatedAt).getTime() >= cutoff);
-  await _ctx.globalState.update(SESSIONS_KEY, globalSessions);
+  await sessionStore.mutateSessions(_ctx.globalState, SESSIONS_KEY, keep);
 
   // Workspace sessions (if a workspace is open)
   const hasWorkspace = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0;
   if (hasWorkspace) {
-    /** @type {Session[]} */
-    let wsSessions = _ctx.workspaceState.get(SESSIONS_KEY, []) || [];
-    wsSessions = wsSessions.filter((s) => new Date(s.updatedAt).getTime() >= cutoff);
-    await _ctx.workspaceState.update(SESSIONS_KEY, wsSessions);
+    await sessionStore.mutateSessions(_ctx.workspaceState, SESSIONS_KEY, keep);
   }
 }
 
@@ -338,6 +351,8 @@ async function deleteExpiredSessions() {
  * @property {string} [summary] - Rolling summary of compacted messages
  * @property {number} [summaryTurns] - Number of user turns covered by the summary
  * @property {number} [summaryCoversUpTo] - Number of leading conversation messages covered by the summary (non-destructive compaction)
+ * @property {string} [modelId] - Model chosen for this chat (per-chat model selection)
+ * @property {string} [reasoningEffort] - Reasoning effort chosen for this chat
  */
 
 /**
@@ -412,5 +427,5 @@ async function setMcpServers(servers) {
   await _ctx.globalState.update(MCP_KEY, servers);
 }
 
-module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getToolApprovalModes, setToolApprovalMode, getMcpApprovalModes, setMcpApprovalMode, clearMcpApprovalMode, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, setSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers, getCompaction, setCompaction };
+module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getToolApprovalModes, setToolApprovalMode, getMcpApprovalModes, setMcpApprovalMode, clearMcpApprovalMode, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, mutateSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers, getCompaction, setCompaction };
 

@@ -29,8 +29,9 @@ function setup(t, initialModels = []) {
     },
   });
   ModelConfigPanel._panel = { webview: { postMessage: message => posted.push(message) } };
-  ModelConfigPanel._onChanged = () => { changes++; };
-  t.after(() => { ModelConfigPanel._panel = null; ModelConfigPanel._onChanged = null; });
+  const listener = () => { changes++; };
+  const unregister = ModelConfigPanel.addListener(listener);
+  t.after(() => { ModelConfigPanel._panel = null; unregister(); });
   return { state, secrets, posted, changes: () => changes };
 }
 

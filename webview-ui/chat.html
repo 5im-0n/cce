@@ -101,6 +101,22 @@
     }
     .session-item:hover .si-del { opacity: 0.5; }
     .session-item .si-del:hover { opacity: 1; }
+    .session-item .si-tab {
+      background: none;
+      border: none;
+      color: var(--vscode-foreground);
+      cursor: pointer;
+      opacity: 0;
+      font-size: 12px;
+      padding: 0 4px;
+      margin-left: 4px;
+    }
+    .session-item:hover .si-tab { opacity: 0.5; }
+    .session-item .si-tab:hover { opacity: 1; }
+    /* A session already shown by another chat: dimmed, with the tab button lit
+       so "open" reads as "switch to that chat". */
+    .session-item.si-busy .si-title { opacity: 0.7; }
+    .session-item.si-busy .si-tab { opacity: 0.5; }
 
     /* ── messages ── */
     .chat-messages {
@@ -601,6 +617,14 @@
       font-style: italic;
       color: var(--vscode-descriptionForeground);
     }
+    .approval-card .ac-conflict {
+      padding: 6px 10px;
+      font-size: 11px;
+      border-top: 1px solid var(--vscode-sideBarSectionHeader-border);
+      color: var(--vscode-inputValidation-warningForeground, #cca700);
+      background: var(--vscode-inputValidation-warningBackground, rgba(204, 167, 0, 0.1));
+    }
+    .approval-card .ac-conflict div + div { margin-top: 2px; }
     .approval-card .ac-args {
       padding: 6px 10px;
       font-family: var(--vscode-editor-font-family);
@@ -673,6 +697,13 @@
         <path fill-rule="evenodd" d="M8 2.5a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5A.75.75 0 0 1 8 2.5z" clip-rule="evenodd"/>
       </svg>
     </button>
+    <button class="icon-btn" id="newTabBtn" title="Open another chat in a new editor tab">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M1.5 1h9A1.5 1.5 0 0 1 12 2.5v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 0 8.5v-6A1.5 1.5 0 0 1 1.5 1zM2 2.5v6h8v-6H2z"/>
+        <path d="M4.5 10h7a2 2 0 0 0 2-2V3.5a1.5 1.5 0 0 0-1.5-1.5h-.5v1h.5a.5.5 0 0 1 .5.5V8a1 1 0 0 1-1 1h-7v1z"/>
+        <path d="M12.5 13.5h-9A1.5 1.5 0 0 1 2 12v-1H1v1a2.5 2.5 0 0 0 2.5 2.5h9v-1z"/>
+      </svg>
+    </button>
     <button class="icon-btn" id="settingsBtn" title="Settings">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
         <path fill-rule="evenodd" d="M9.1 4.4L8.6 2H7.4l-.5 2.4-.7.3-2-1.3-.9.8 1.3 2-.3.7-2.4.5v1.2l2.4.5.3.7-1.3 2 .8.8 2-1.3.7.3.5 2.4h1.2l.5-2.4.7-.3 2 1.3.9-.8-1.3-2 .3-.7 2.4-.5V7.4l-2.4-.5-.3-.7 1.3-2-.8-.8-2 1.3-.7-.3zM9.7 8a1.7 1.7 0 1 1-3.4 0 1.7 1.7 0 0 1 3.4 0z" clip-rule="evenodd"/>
@@ -743,6 +774,7 @@
     var settingsBtn = document.getElementById("settingsBtn");
     var sessionsBtn = document.getElementById("sessionsBtn");
     var newSessionBtn = document.getElementById("newSessionBtn");
+    var newTabBtn = document.getElementById("newTabBtn");
     var sessionList = document.getElementById("sessionList");
     var sessionItems = document.getElementById("sessionItems");
     var closeSessions = document.getElementById("closeSessions");
@@ -1090,6 +1122,16 @@
         note = "<div class='ac-note'>Approval is per server and applies to all tools this server exposes. \"Allow for this session\" covers every tool on this server until the session changes.</div>";
       }
 
+      // Other CCE chats working on the same target right now. Advisory only:
+      // the user decides whether to proceed.
+      var conflicts = "";
+      if (m.conflicts && m.conflicts.length > 0) {
+        conflicts =
+          "<div class='ac-conflict'>" +
+          m.conflicts.map(function (line) { return "<div>" + escH(line) + "</div>"; }).join("") +
+          "</div>";
+      }
+
       // Show a readable label for MCP tools: "<server> · <tool>"
       var toolDisplay = m.toolName;
       if (isMcp) {
@@ -1114,6 +1156,7 @@
         "<div class='ac-head'><span class='ac-tool'>" + escH(toolDisplay) + "</span>" +
         "<span class='ac-risk'>" + escH(m.riskLabel || "") + "</span></div>" +
         note +
+        conflicts +
         "<div class='ac-args'>" + escH(m.args || "") + "</div>" +
         "<div class='ac-actions'>" + actions + "</div>";
       messagesEl.appendChild(card);
@@ -1309,6 +1352,9 @@
       vscode.postMessage({ type: "newSession" });
       sessionList.style.display = "none";
     });
+    newTabBtn.addEventListener("click", function () {
+      vscode.postMessage({ type: "openChatTab" });
+    });
 
     // ── host messages ──
     window.addEventListener("message", function (e) {
@@ -1321,7 +1367,7 @@
         populateModels(m.models, m.activeModel, m.reasoningEffort);
 
       } else if (m.type === "sessionsLoaded") {
-        renderSessions(m.sessions, m.currentSessionId);
+        renderSessions(m.sessions, m.currentSessionId, m.busySessionIds);
 
       } else if (m.type === "clearChat") {
         resetTranscriptCopyState();
@@ -1510,20 +1556,42 @@
       currentMode = null;
     }
 
-    function renderSessions(sessions, currentId) {
+    /**
+     * @param {Array<{id: string, title: string, updatedAt: string}>} sessions
+     * @param {string} currentId
+     * @param {Array<string>} [busySessionIds] - sessions another chat is showing.
+     */
+    function renderSessions(sessions, currentId, busySessionIds) {
+      var busy = {};
+      (busySessionIds || []).forEach(function (id) { busy[id] = true; });
       sessionItems.innerHTML = sessions.map(function(s) {
         var active = s.id === currentId ? " active" : "";
         var time = new Date(s.updatedAt).toLocaleDateString();
-        return '<div class="session-item' + active + '" data-id="' + escH(s.id) + '">' +
+        // A session another chat already shows is marked, and its "open in a
+        // tab" button explains that it reveals that chat instead of opening a
+        // second conversation on the same transcript.
+        var elsewhere = busy[s.id] ? " si-busy" : "";
+        var tabTitle = busy[s.id]
+          ? "This session is already open in another CCE chat \u2014 clicking switches to it"
+          : "Open in a new editor tab";
+        return '<div class="session-item' + active + elsewhere + '" data-id="' + escH(s.id) + '">' +
           '<span class="si-title">' + escH(s.title || "New session") + '</span>' +
           '<span class="si-time">' + escH(time) + '</span>' +
+          '<button class="si-tab" data-id="' + escH(s.id) + '" title="' + escH(tabTitle) + '">&#8599;</button>' +
           '<button class="si-del" data-id="' + escH(s.id) + '" title="Delete">&times;</button>' +
         '</div>';
       }).join('');
       sessionItems.querySelectorAll('.session-item').forEach(function(el) {
         el.addEventListener('click', function(e) {
-          if (e.target.classList.contains('si-del')) return;
+          if (e.target.classList.contains('si-del') || e.target.classList.contains('si-tab')) return;
           vscode.postMessage({ type: 'switchSession', sessionId: el.dataset.id });
+          sessionList.style.display = 'none';
+        });
+      });
+      sessionItems.querySelectorAll('.si-tab').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          vscode.postMessage({ type: 'openChatTab', sessionId: btn.dataset.id });
           sessionList.style.display = 'none';
         });
       });
@@ -1536,7 +1604,10 @@
     }
 
     textarea.focus();
-    vscode.postMessage({ type: "requestModels" });
+    // Ask for the full state once the document is live. The host also replays
+    // it when a view is attached, but those posts can precede this script and
+    // be dropped — this request guarantees the webview starts in sync.
+    vscode.postMessage({ type: "requestState" });
   </script>
 </body>
 </html>

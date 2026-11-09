@@ -46,8 +46,29 @@
         "command": "cce.openChat",
         "title": "CCE: Open Chat",
         "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "cce.newChatTab",
+        "title": "CCE: New Chat Tab",
+        "icon": "$(add)"
       }
-    ]
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "cce.newChatTab",
+          "when": "view == 'cce.chatView'",
+          "group": "navigation@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "cce.newChatTab",
+          "when": "activeWebviewPanelId == 'cceChat'",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "scripts": {
     "lint": "eslint .",

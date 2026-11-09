@@ -6,7 +6,7 @@
 
 The assistant is agentic: it can act on the workspace through tools (read, edit, search, run commands) gated by a risk-based approval policy, and MCP servers can be registered to extend its tool set. Conversations persist as sessions and can be restored.
 
-The assistant panel lives in the VSCode sidebar and supports switching between models at runtime without restart.
+Several chats can be open at once: the sidebar chat plus any number of editor tabs, each with its own conversation, session, model, reasoning effort, Stop button and approval cards. A session is owned by one chat at a time. All chats share the workspace, so cross-chat tool conflicts are detected and surfaced as warnings in the approval card. The model dropdown is per chat and supports switching at runtime without restart.
 
 > Note: this file is read by the extension and injected into the assistant's system prompt as project context — keep it accurate and concise.
 
@@ -36,10 +36,12 @@ The assistant panel lives in the VSCode sidebar and supports switching between m
 
 1. **Webview UI is plain HTML/CSS/JS.** No framework overhead.
 2. **No secrets in the webview.** API keys stay in the extension host.
-3. **Model selection is a dropdown in the chat header.** Changing the model mid-conversation is allowed — subsequent messages use the new model.
+3. **Model selection is a dropdown in the chat header.** Each chat remembers its model and reasoning effort on its session; changing the model mid-conversation is allowed — subsequent messages use the new model. The last model picked anywhere also becomes the default for new chats.
 4. **Conversation history lives on the extension host side** and persists as sessions; the webview only renders what it's told.
-5. **Abort support:** every chat request supports an AbortSignal so the user can cancel a long response.
+5. **Abort support:** every chat request supports an AbortSignal so the user can cancel a long response. Closing a chat tab aborts it, denies its pending approvals and saves the transcript.
 6. **Extension size matters.** Keep dependencies minimal; prefer built-in Node modules.
+7. **One chat = one controller.** `src/chat/manager.js` owns the open chats (sidebar + editor tabs) and session ownership; `src/chat/controller.js` is one chat's brain and never touches a webview directly — it posts through the sink installed by `attach()`. `src/chat/view.js` hosts a controller in either the sidebar view or an editor panel.
+8. **Sessions are written through `Settings.mutateSessions`.** Never write the whole session array: several chats save concurrently and a blind write would drop another chat's save.
 
 ## Before Implementing
 
