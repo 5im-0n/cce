@@ -1,5 +1,6 @@
 const vscode = require("vscode");
 const { renderChatHtml } = require("./html");
+const { PANEL_VIEW_TYPE } = require("./panel-state");
 const log = require("../config/log").get();
 
 /**
@@ -71,32 +72,71 @@ function createSidebarViewHost(context, getController) {
 }
 
 /**
- * Open a chat in an editor tab beside the active editor.
+ * @typedef {Object} EditorChatHost
+ * @property {vscode.WebviewPanel} panel
+ * @property {(title: string) => void} setTitle
+ * @property {() => void} reveal
+ */
+
+/**
+ * Wire a chat controller to an existing editor panel.
  *
- * Closing the tab aborts in-flight work, denies pending approvals and saves
- * the transcript before the controller is dropped.
+ * Used both for a panel this extension just created and for a panel VS Code
+ * restored after a window reload — the transport is identical, which is why
+ * the serialized tab needs no special code path beyond creating the
+ * controller first.
+ *
+ * Closing the tab detaches the sink (so no post lands on a dead webview), then
+ * hands off to the manager, which aborts, denies approvals, saves and releases
+ * the session.
  *
  * @param {vscode.ExtensionContext} context
+ * @param {vscode.WebviewPanel} panel
  * @param {import("./controller").ChatController} controller
  * @param {(chatId: string) => Promise<void>} onClosed
- * @returns {{ panel: vscode.WebviewPanel, setTitle: (title: string) => void, reveal: () => void }}
+ * @returns {EditorChatHost}
  */
-function createEditorChatPanel(context, controller, onClosed) {
-  const panel = vscode.window.createWebviewPanel(
-    "cceChat",
-    "CCE: " + controller.getTitle(),
-    vscode.ViewColumn.Beside,
-    { enableScripts: true, retainContextWhenHidden: true }
-  );
+function attachEditorChatPanel(context, panel, controller, onClosed) {
   panel.iconPath = vscode.Uri.joinPath(context.extensionUri, "resources", "icon.png");
+  panel.webview.options = { enableScripts: true };
   panel.webview.html = renderChatHtml(context.extensionPath);
 
+  /** @type {string | null} */
+  let lastPersistedSessionId = null;
+  let hasPersisted = false;
+
+  /**
+   * Tell the webview which session this tab shows.
+   *
+   * `setState` can only be called from inside the webview, so the host pushes
+   * the value down whenever it changes. VS Code keeps it across a window
+   * reload and hands it back to the serializer, which reopens that session.
+   *
+   * @param {boolean} [force] - Post even when the id is unchanged (the webview
+   *   asked for the full state and may be newer than our last post).
+   * @returns {void}
+   */
+  function postPanelState(force) {
+    const sessionId = controller.getSessionId() || null;
+    if (!force && hasPersisted && sessionId === lastPersistedSessionId) return;
+    lastPersistedSessionId = sessionId;
+    hasPersisted = true;
+    void panel.webview.postMessage({ type: "persistPanelState", sessionId });
+  }
+
   const listener = panel.webview.onDidReceiveMessage((msg) => {
+    // The webview asks for the full state once its script is live; answer with
+    // the panel state too, because the replay in `attach` can precede it.
+    if (msg && msg.type === "requestState") postPanelState(true);
     controller.handleMessage(msg, panel.webview);
   });
 
   controller.attach((msg) => {
     void panel.webview.postMessage(msg);
+    // The session changes on switch/new/delete, and a brand-new chat gets its
+    // id on the first send — `sessionsLoaded` carries that too, so track both
+    // and let the duplicate check keep it to one post per change.
+    if (msg && (msg.type === "sessionSwitched" || msg.type === "sessionsLoaded")) postPanelState();
   });
 
   let closed = false;
@@ -121,9 +161,28 @@ function createEditorChatPanel(context, controller, onClosed) {
 }
 
 /**
+ * Create a new editor panel beside the active editor and attach the chat to it.
+ *
+ * @param {vscode.ExtensionContext} context
+ * @param {import("./controller").ChatController} controller
+ * @param {(chatId: string) => Promise<void>} onClosed
+ * @param {{ preserveFocus?: boolean }} [options]
+ * @returns {EditorChatHost}
+ */
+function createEditorChatPanel(context, controller, onClosed, options = {}) {
+  const panel = vscode.window.createWebviewPanel(
+    PANEL_VIEW_TYPE,
+    "CCE: " + controller.getTitle(),
+    { viewColumn: vscode.ViewColumn.Beside, preserveFocus: options.preserveFocus === true },
+    { enableScripts: true, retainContextWhenHidden: true }
+  );
+  return attachEditorChatPanel(context, panel, controller, onClosed);
+}
+
+/**
  * @typedef {Object} ChatController
  * @property {string} id
  * @property {() => string} getTitle
  */
 
-module.exports = { createSidebarViewHost, createEditorChatPanel };
+module.exports = { createSidebarViewHost, createEditorChatPanel, attachEditorChatPanel };

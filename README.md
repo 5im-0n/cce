@@ -170,6 +170,7 @@ More than one conversation can run at the same time. The sidebar chat is the def
 - Each chat has **its own conversation, session, model, reasoning effort, Stop button and approval cards** — answering an approval in one tab can never release a tool call in another.
 - A session is shown by **one chat at a time**. Opening a session that another tab already has reveals that tab instead of forking the transcript; the session list marks such sessions.
 - **Closing a tab aborts its in-flight request**, denies pending approvals and saves the transcript. The session can then be reopened anywhere.
+- **Tabs survive a window reload**: each tab remembers the session it was showing and comes back on the same conversation. A tab whose session was deleted returns as a fresh chat rather than disappearing.
 - Chats share the workspace, so they can touch the same files. When another chat is modifying the same file (or running a command) at the moment you are asked to approve a tool, the approval card **warns you** — nothing is blocked, you decide. Context comes from the editor, though: `get_selection` reads the *active* editor, whichever chat asked.
 - Model and reasoning effort are remembered per session: reopen a session and it comes back with the model you were using. Picking a model in any chat also updates the default for new chats.
 

@@ -5,8 +5,9 @@ const log = require("../config/log").get();
 const { createChatController } = require("./controller");
 const { createActivityRegistry } = require("./activity");
 const { createOwnership } = require("./ownership");
-const { createSidebarViewHost, createEditorChatPanel } = require("./view");
+const { createSidebarViewHost, createEditorChatPanel, attachEditorChatPanel } = require("./view");
 const { withoutEmptySessions } = require("../config/sessionStore");
+const { PANEL_VIEW_TYPE, decodePanelState } = require("./panel-state");
 
 /**
  * Owns every open chat and the rules that keep them from fighting.
@@ -28,6 +29,10 @@ const SIDEBAR_CHAT_ID = "sidebar";
  * @typedef {Object} OpenChat
  * @property {ChatController} controller
  * @property {{ setTitle: (title: string) => void, reveal: () => void, panel: vscode.WebviewPanel } | null} panelHost
+ * @property {boolean} [agentRunning]
+ * @property {number} [pendingAgentCount]
+ * @property {string} [parentChatId]
+ * @property {() => void} [cancelAgent]
  */
 
 /**
@@ -104,9 +109,159 @@ function createChatManager(context) {
 
   // ── chat construction ──
 
+  /** Count live agent jobs, including reserved slots whose tabs are still being created. */
+  function getRunningAgentCount() {
+    let count = 0;
+    for (const chat of chats.values()) {
+      if (chat.agentRunning) count++;
+      count += chat.pendingAgentCount || 0;
+    }
+    return count;
+  }
+
+  /** Notify active parent controllers when global agent capacity changes. */
+  function refreshAgentCapacity() {
+    for (const { controller } of chats.values()) {
+      if (typeof controller.onAgentCapacityChanged === "function") controller.onAgentCapacityChanged();
+    }
+  }
+
+  /**
+   * @param {string} parentChatId
+   */
+  function cancelAgentsForParent(parentChatId) {
+    for (const agent of chats.values()) {
+      if (agent.parentChatId === parentChatId && agent.agentRunning && agent.cancelAgent) {
+        agent.cancelAgent();
+      }
+    }
+  }
+
+  /**
+   * Spawn visible agent chats, reserving the available slots synchronously so
+   * concurrent parent requests cannot exceed the configured global maximum.
+   * @param {import("./agent").AgentRunOptions & { parentChatId: string }} options
+   * @returns {Promise<string>}
+   */
+  async function runVisibleAgents(options) {
+    const parentChat = chats.get(options.parentChatId);
+    if (!parentChat) return "Error: parent chat is no longer open.";
+    const tasks = Array.isArray(options.tasks) ? options.tasks : [];
+    if (tasks.length === 0) return "No tasks provided.";
+    if (options.signal && options.signal.aborted) return "No agents spawned: the parent request was cancelled.";
+
+    const capacity = Settings.getMaxSimultaneousAgents();
+    const available = Math.max(0, capacity - getRunningAgentCount());
+    const accepted = tasks.slice(0, available);
+    const rejected = tasks.length - accepted.length;
+    if (accepted.length === 0) {
+      return "No agents spawned: capacity is full (0 of " + capacity + " available). Wait for an agent to finish and try again.";
+    }
+
+    // Reserve before any async work (MCP discovery/panel setup) to close the
+    // race between simultaneous agent tool calls.
+    parentChat.pendingAgentCount = (parentChat.pendingAgentCount || 0) + accepted.length;
+    refreshAgentCapacity();
+    const jobs = accepted.map((task, index) => spawnVisibleAgent(options, task, index));
+    const results = await Promise.all(jobs);
+    const suffix = rejected > 0 ? "\n\n" + rejected + " task(s) were not started because the simultaneous-agent limit was reached." : "";
+    return results.join("\n\n") + suffix;
+  }
+
+  /**
+   * Create and run a child chat. Its webview receives streamed content and
+   * tool updates through the same controller protocol used by ordinary chats.
+   * @param {import("./agent").AgentRunOptions & { parentChatId: string }} options
+   * @param {string} task
+   * @param {number} index
+   * @returns {Promise<string>}
+   */
+  async function spawnVisibleAgent(options, task, index) {
+    const parent = chats.get(options.parentChatId);
+    if (parent) parent.pendingAgentCount = Math.max(0, (parent.pendingAgentCount || 0) - 1);
+    if (disposed || !parent) {
+      refreshAgentCapacity();
+      return "Agent " + (index + 1) + " was not started because its parent chat closed.";
+    }
+
+    const agentId = newChatId();
+    const agentChat = buildController(agentId, {
+      isAgent: true,
+      modelId: options.modelConfig.id,
+      reasoningEffort: options.reasoningEffort,
+    });
+    const agentAbortController = new AbortController();
+    const abortFromParent = () => agentAbortController.abort();
+    const entry = chats.get(agentId);
+    if (options.signal) {
+      if (options.signal.aborted) abortFromParent();
+      else options.signal.addEventListener("abort", abortFromParent, { once: true });
+    }
+    if (!entry) return "Agent " + (index + 1) + " could not be created.";
+    entry.agentRunning = true;
+    entry.parentChatId = options.parentChatId;
+
+    const cancelAgent = () => {
+      if (agentAbortController.signal.aborted) return;
+      agentAbortController.abort();
+      entry.cancelAgent = undefined;
+      agentChat.abortAll();
+      const current = chats.get(agentId);
+      if (current && current.panelHost) current.panelHost.panel.dispose();
+    };
+    entry.cancelAgent = cancelAgent;
+    const unregister = typeof parent.controller.registerOwnedAgent === "function"
+      ? parent.controller.registerOwnedAgent({ cancel: cancelAgent })
+      : () => {};
+    if (agentAbortController.signal.aborted) cancelAgent();
+
+    try {
+      const host = createEditorChatPanel(context, agentChat, closeChat, { preserveFocus: true });
+      entry.panelHost = host;
+      setChatTitle(agentId, "Agent " + (index + 1) + ": " + (String(task).slice(0, 48) || "Task"));
+      const result = await agentChat.runAgentTask({
+        task: String(task),
+        modelConfig: options.modelConfig,
+        apiKey: options.apiKey,
+        provider: options.provider,
+        budget: options.budget,
+        reasoningEffort: options.reasoningEffort,
+        signal: agentAbortController.signal,
+        onProgress: (text) => agentChat.postAgentProgress(text),
+      });
+      const finalResult = extractFinalAgentResponse(agentChat, result);
+      entry.agentRunning = false;
+      entry.cancelAgent = undefined;
+      refreshAgentCapacity();
+      agentChat.onAgentCapacityChanged();
+      if (Settings.getAutoCloseAgents() && entry.panelHost) entry.panelHost.panel.dispose();
+      return "Agent " + (index + 1) + " result:\n" + finalResult;
+    } catch (e) {
+      entry.agentRunning = false;
+      entry.cancelAgent = undefined;
+      const message = e instanceof Error ? e.message : String(e);
+      return "Agent " + (index + 1) + " error: " + message;
+    } finally {
+      if (options.signal) options.signal.removeEventListener("abort", abortFromParent);
+      unregister();
+      refreshAgentCapacity();
+    }
+  }
+
+  /**
+   * Extract the final assistant content from the child transcript, rather than
+   * returning the UI's sentinel completion string to the parent model.
+   * @param {string} fallback
+   * @returns {string}
+   */
+  function extractFinalAgentResponse(agentChat, fallback) {
+    const answer = agentChat.getLastAssistantResponse && agentChat.getLastAssistantResponse();
+    return answer || fallback || "(no output)";
+  }
+
   /**
    * @param {string} chatId
-   * @param {{ sessionId?: string, restoreCurrent?: boolean, persistCurrent?: boolean }} options
+   * @param {{ sessionId?: string, restoreCurrent?: boolean, persistCurrent?: boolean, isAgent?: boolean, modelId?: string, reasoningEffort?: string }} options
    * @returns {ChatController}
    */
   function buildController(chatId, options) {
@@ -115,6 +270,9 @@ function createChatManager(context) {
       sessionId: options.sessionId,
       restoreCurrent: options.restoreCurrent,
       persistCurrent: options.persistCurrent,
+      isAgent: options.isAgent === true,
+      modelId: options.modelId,
+      reasoningEffort: options.reasoningEffort,
       hooks: {
         canTakeSession: (sessionId) => ownership.canTake(sessionId, chatId),
         onSessionTaken: (sessionId) => {
@@ -140,9 +298,16 @@ function createChatManager(context) {
         onTitleChanged: (title) => setChatTitle(chatId, title),
         onMessage: (msg) => handleUnhandledMessage(chatId, msg),
         activity,
+        runAgent: (agentOptions) => runVisibleAgents({ ...agentOptions, parentChatId: chatId }),
+        abortOwnedAgents: () => cancelAgentsForParent(chatId),
+        getAgentCapacity: () => ({
+          maximum: Settings.getMaxSimultaneousAgents(),
+          available: Math.max(0, Settings.getMaxSimultaneousAgents() - getRunningAgentCount()),
+        }),
       },
     });
     chats.set(chatId, { controller, panelHost: null });
+    refreshAgentCapacity();
     return controller;
   }
 
@@ -198,6 +363,79 @@ function createChatManager(context) {
   // ── editor tabs ──
 
   /**
+   * Allocate a chat id that no open chat is using.
+   *
+   * Restored tabs come back before a user can open new ones, but ids must
+   * never collide: the map entry would be overwritten and the first
+   * controller would be orphaned while still owning its session.
+   *
+   * @returns {string}
+   */
+  function newChatId() {
+    let chatId = "tab-" + nextPanelNumber++;
+    while (chats.has(chatId)) chatId = "tab-" + nextPanelNumber++;
+    return chatId;
+  }
+
+  /**
+   * Whether a session can be reopened in a restored tab: it must still exist
+   * and must not already be shown by another chat.
+   *
+   * @param {string | null} sessionId
+   * @returns {string | null} The session to open, or null for a fresh chat.
+   */
+  function restorableSessionId(sessionId) {
+    if (!sessionId) return null;
+    // Another chat already shows it (two tabs restored for one session, or a
+    // stale state): falling back to a fresh chat keeps the tab, and the
+    // conversation, in the chat that really owns it.
+    if (ownership.ownerOf(sessionId)) return null;
+    const exists = withoutEmptySessions(Settings.getSessions()).some((s) => s.id === sessionId);
+    return exists ? sessionId : null;
+  }
+
+  /**
+   * Recreate a chat in a panel VS Code restored after a window reload.
+   *
+   * The webview persisted the id of the session it was showing; the session
+   * itself lives in the workspace store, so the conversation comes back as it
+   * was last saved. A tab whose session has since been deleted, or that is now
+   * owned by another chat, comes back as a fresh chat rather than vanishing.
+   *
+   * @param {vscode.WebviewPanel} panel
+   * @param {any} state - Whatever the webview passed to `setState`.
+   * @returns {Promise<void>}
+   */
+  async function restoreChatPanel(panel, state) {
+    if (disposed) {
+      panel.dispose();
+      return;
+    }
+    const { sessionId } = decodePanelState(state);
+    const chatId = newChatId();
+    const controller = buildController(chatId, { sessionId: restorableSessionId(sessionId) || undefined });
+    const host = attachEditorChatPanel(context, panel, controller, closeChat);
+    const open = chats.get(chatId);
+    if (open) open.panelHost = host;
+    setChatTitle(chatId, controller.getTitle());
+  }
+
+  /**
+   * Register the serializer that brings editor-tab chats back after a window
+   * reload. Must be called once during activate(); the extension is activated
+   * for restoration through the `onWebviewPanel` activation event.
+   *
+   * @returns {vscode.Disposable}
+   */
+  function registerPanelSerializer() {
+    return vscode.window.registerWebviewPanelSerializer(PANEL_VIEW_TYPE, {
+      deserializeWebviewPanel(panel, state) {
+        return restoreChatPanel(panel, state);
+      },
+    });
+  }
+
+  /**
    * Open a chat in an editor tab. Reveals the existing tab when the requested
    * session is already open somewhere instead of creating a second view of the
    * same conversation.
@@ -220,7 +458,7 @@ function createChatManager(context) {
       }
     }
 
-    const chatId = "tab-" + nextPanelNumber++;
+    const chatId = newChatId();
     // Build the chat without a session, then open the requested one through the
     // controller so the panel shows it immediately and a session that vanished
     // between the check above and here cannot leave a half-initialised tab.
@@ -327,10 +565,16 @@ function createChatManager(context) {
 
   return {
     registerSidebar,
+    registerPanelSerializer,
     getSidebarChat,
     openChatTab,
     broadcastModels,
     broadcastSessions,
+    runVisibleAgents,
+    getAgentCapacity: () => ({
+      maximum: Settings.getMaxSimultaneousAgents(),
+      available: Math.max(0, Settings.getMaxSimultaneousAgents() - getRunningAgentCount()),
+    }),
     shutdown,
     dispose,
   };

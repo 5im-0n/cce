@@ -135,6 +135,12 @@ class ModelConfigPanel {
         case "setToolApprovalMode":
           await Settings.setToolApprovalMode(msg.toolName, msg.mode);
           break;
+        case "setMaxSimultaneousAgents":
+          await Settings.setMaxSimultaneousAgents(msg.value);
+          break;
+        case "setAutoCloseAgents":
+          await Settings.setAutoCloseAgents(msg.enabled);
+          break;
         case "setContextFlag":
           await Settings.setContextFlag(msg.flag, msg.enabled);
           break;
@@ -206,6 +212,8 @@ class ModelConfigPanel {
       systemPrompt: Settings.getSystemPrompt(),
       toolSettings: Settings.getToolSettings(),
       toolApprovalModes: Settings.getToolApprovalModes(),
+      maxSimultaneousAgents: Settings.getMaxSimultaneousAgents(),
+      autoCloseAgents: Settings.getAutoCloseAgents(),
       mcpApprovalModes: Settings.getMcpApprovalModes(),
       contextFlags: Settings.getContextFlags(),
       useAgentsMd: Settings.getUseAgentsMd(),

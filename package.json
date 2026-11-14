@@ -20,6 +20,7 @@
     "Other"
   ],
   "main": "./src/extension.js",
+  "activationEvents": ["onWebviewPanel:cceChat"],
   "contributes": {
     "viewsContainers": {
       "activitybar": [

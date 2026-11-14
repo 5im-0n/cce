@@ -207,6 +207,23 @@
       resize: vertical;
       min-height: 80px;
     }
+    .agent-checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .agent-checkbox-row input[type="checkbox"] {
+      width: auto;
+      flex: 0 0 auto;
+      margin: 0;
+      padding: 0;
+    }
+    .agent-checkbox-row label {
+      display: inline;
+      margin: 0;
+      font-weight: 400;
+      cursor: pointer;
+    }
     .form-row { display: flex; gap: 12px; }
     .form-row .form-group { flex: 1; }
 
@@ -478,6 +495,17 @@
       Approval: <b>Ask</b> prompts you in the chat before each call, <b>Auto</b> runs without asking, <b>Deny</b> blocks the tool entirely. Read-only tools default to Auto; everything else defaults to Ask.
     </div>
     <div id="toolToggles"></div>
+    <div style="margin-top:24px; padding-top:20px; border-top:1px solid var(--vscode-sideBarSectionHeader-border);">
+      <div class="form-group">
+        <label for="maxSimultaneousAgents">Maximum simultaneous running agents</label>
+        <input type="number" id="maxSimultaneousAgents" min="1" max="10" step="1" value="3" style="width:90px;">
+        <div class="api-key-hint">Limits agents that are currently working. Completed agent tabs stay open for inspection and do not use a slot. The model is told how many more agents it can start.</div>
+      </div>
+      <div class="form-group agent-checkbox-row">
+        <input type="checkbox" id="autoCloseAgents">
+        <label for="autoCloseAgents">Automatically close agent tabs when they finish</label>
+      </div>
+    </div>
   </section>
 
   <!-- ── MCP tab ── -->
@@ -803,6 +831,18 @@
 
     // ── Tools tab ──
     var toolTogglesEl = document.getElementById('toolToggles');
+    var maxSimultaneousAgentsEl = document.getElementById('maxSimultaneousAgents');
+    var autoCloseAgentsEl = document.getElementById('autoCloseAgents');
+    maxSimultaneousAgentsEl.addEventListener('change', function() {
+      var value = parseInt(maxSimultaneousAgentsEl.value, 10);
+      if (!Number.isFinite(value)) value = 3;
+      value = Math.max(1, Math.min(10, value));
+      maxSimultaneousAgentsEl.value = value;
+      vscode.postMessage({ type: 'setMaxSimultaneousAgents', value: value });
+    });
+    autoCloseAgentsEl.addEventListener('change', function() {
+      vscode.postMessage({ type: 'setAutoCloseAgents', enabled: autoCloseAgentsEl.checked });
+    });
 
     var TOOL_DEFS = [
       { name: 'read_file', label: 'Read File', desc: 'Read contents of workspace files.', risk: 'read' },
@@ -1163,6 +1203,8 @@
         useAgentsMdToggle.checked = msg.useAgentsMd !== false;
         agentsMdPathEl.value = msg.agentsMdPath || 'AGENTS.md';
         renderToolToggles(msg.toolSettings || {}, msg.toolApprovalModes || {});
+        maxSimultaneousAgentsEl.value = msg.maxSimultaneousAgents || 3;
+        autoCloseAgentsEl.checked = msg.autoCloseAgents === true;
         renderMcpList(msg.mcpServers || []);
         renderSessionList(msg.sessions || []);
         sessionsMaxAgeEl.value = msg.sessionsMaxAge || 0;

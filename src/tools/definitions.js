@@ -158,10 +158,11 @@ The scan stops after ${MAX_FILES_SCANNED.toLocaleString("en-US")} files; results
       name: "agent",
       description:
         "Spawn parallel sub-agents to work on multiple independent tasks simultaneously. " +
-        "Each sub-agent receives a prompt and returns a result. Use this when you can break work into parallel pieces " +
-        "(e.g., searching multiple files, analyzing different parts of code, researching multiple topics at once). " +
-        "Sub-agents have access to all tools and can execute multiple tool-calling rounds (up to 10) before returning a final result. " +
-        "Give each sub-agent a complete, self-contained prompt with enough context to work independently.",
+        "Each sub-agent opens in its own visible CCE editor tab, runs independently, and returns its final result here; this call waits for the agents it starts. " +
+        "Use this when you can break work into parallel pieces (e.g., searching multiple files, analyzing different parts of code, researching multiple topics at once). " +
+        "Sub-agents have access to enabled tools and can execute multiple tool-calling rounds (up to 10) before returning a final result. " +
+        "Give each sub-agent a complete, self-contained prompt with enough context to work independently. " +
+        "The current available simultaneous-agent capacity is supplied below; do not submit more tasks than that.",
       parameters: {
         type: "object",
         properties: {
@@ -256,20 +257,54 @@ The scan stops after ${MAX_FILES_SCANNED.toLocaleString("en-US")} files; results
 /**
  * Return the subset of tool definitions that are enabled.
  * @param {Record<string, boolean>} enabledTools
+ * @param {{ available: number, maximum: number }} [agentCapacity]
  * @returns {Array<ToolDefinition>}
  */
-function getEnabledDefinitions(enabledTools) {
+function getEnabledDefinitions(enabledTools, agentCapacity) {
   return TOOL_DEFINITIONS.filter((t) => {
     const name = t.function.name;
     // Agent tool is off by default (experimental) — requires explicit opt-in
     if (name === "agent") return enabledTools[name] === true;
     return enabledTools[name] !== false;
   }).map((t) => {
+    if (t.function.name === "agent") return attachAgentCapacity(t, agentCapacity);
     // run_command gets shell guidance so the model writes syntax the actual
     // exec shell (cmd.exe on Windows, /bin/sh on POSIX) will accept.
     if (t.function.name === "run_command") return attachShellGuidance(t);
     return t;
   });
+}
+
+/**
+ * Append live concurrent-agent capacity to the agent tool description.
+ * @param {ToolDefinition} tool
+ * @param {{ available: number, maximum: number }} [capacity]
+ * @returns {ToolDefinition}
+ */
+function attachAgentCapacity(tool, capacity) {
+  if (!capacity || typeof capacity.available !== "number" || typeof capacity.maximum !== "number") return tool;
+  const maximum = Math.max(0, Math.floor(capacity.maximum));
+  const available = Math.max(0, Math.min(maximum, Math.floor(capacity.available)));
+  const params = /** @type {{ type: string, properties: Record<string, object>, required?: string[] }} */ (tool.function.parameters);
+  const currentCapacity = available + " of " + maximum + " additional agent" + (available === 1 ? "" : "s") + " can be spawned simultaneously.";
+  return {
+    ...tool,
+    function: {
+      ...tool.function,
+      description: tool.function.description + " Current capacity: " + currentCapacity,
+      parameters: {
+        ...params,
+        properties: {
+          ...params.properties,
+          tasks: {
+            ...params.properties.tasks,
+            description: "List of prompts. Each prompt opens a separate visible agent tab and counts against the current capacity: " + currentCapacity,
+            maxItems: available,
+          },
+        },
+      },
+    },
+  };
 }
 
 /**

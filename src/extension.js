@@ -39,6 +39,11 @@ function activate(context) {
     })
   );
 
+  // Bring editor-tab chats back after a window reload. VS Code calls the
+  // serializer with the state the webview saved (`setState`), which is the id
+  // of the session that tab was showing.
+  context.subscriptions.push(chatManager.registerPanelSerializer());
+
   // Register the commands. VS Code's generated view-focus command is public
   // API and reveals the activity-bar container when it focuses the view.
   context.subscriptions.push(

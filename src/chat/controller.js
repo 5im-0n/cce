@@ -44,6 +44,9 @@ const { resolveModelId, resolveEffort } = require("./model-choice");
  * @property {(title: string) => void} onTitleChanged - update the tab/view title.
  * @property {(msg: Record<string, any>) => void} onMessage - host message not handled here (e.g. configureModels).
  * @property {ChatActivityRegistry} activity - in-flight tool registry shared by all chats.
+ * @property {() => { available: number, maximum: number }} [getAgentCapacity]
+ * @property {(options: import("./agent").AgentRunOptions & { parentChatId: string }) => Promise<string>} [runAgent]
+ * @property {() => void} [abortOwnedAgents] - Cancel agents spawned by this chat.
  */
 
 /**
@@ -68,6 +71,10 @@ const { resolveModelId, resolveEffort } = require("./model-choice");
 function createChatController(options) {
   const { id: chatId, hooks } = options;
   const activity = hooks.activity;
+  const isAgent = options.isAgent === true;
+  const initialModelId = options.modelId;
+  /** @type {Set<{ cancel: () => void }>} */
+  const ownedAgents = new Set();
 
   /** @type {((msg: Record<string, any>) => void) | null} */
   let sink = null;
@@ -135,6 +142,7 @@ function createChatController(options) {
     if (conversation.length > 0) {
       post({ type: "historyRestored", messages: conversation });
     }
+    if (hooks.getAgentCapacity) post({ type: "agentCapacityChanged", capacity: hooks.getAgentCapacity() });
   }
 
   /**
@@ -564,7 +572,7 @@ function createChatController(options) {
    *   the most recent user message with text/images and regenerate from there
    * @returns {Promise<void>}
    */
-  async function handleSendMessage(messageId, text, images, editingId) {
+  async function handleSendMessage(messageId, text, images, editingId, externalSignal) {
     const models = Settings.getModels();
     const modelConfig = models.find((m) => m.id === activeModel) || models[0];
     if (!modelConfig) {
@@ -608,8 +616,11 @@ function createChatController(options) {
       ensureSession();
     }
 
-    // Gather enabled tools
-    let tools = getEnabledDefinitions(Settings.getToolSettings());
+    // Gather enabled tools. The manager's capacity callback includes all live
+    // agents across every chat, so the model sees current global capacity.
+    const toolSettings = { ...Settings.getToolSettings() };
+    if (isAgent) toolSettings.agent = false;
+    let tools = getEnabledDefinitions(toolSettings, hooks.getAgentCapacity ? hooks.getAgentCapacity() : undefined);
 
     // Fetch MCP tools (both HTTP and stdio)
     try {
@@ -667,6 +678,11 @@ function createChatController(options) {
     // The abort controller is created up-front so the user's Stop button also
     // cancels a compaction pass that may run before the main request.
     abortController = new AbortController();
+    const abortExternal = () => abortController && abortController.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) abortExternal();
+      else externalSignal.addEventListener("abort", abortExternal, { once: true });
+    }
 
     // Auto-compaction: fold older turns into a rolling summary when the
     // estimated request size passes the configured threshold. Non-destructive:
@@ -727,6 +743,7 @@ function createChatController(options) {
       postError(messageId, err instanceof Error ? err.message : String(err));
     } finally {
       abortController = null;
+      if (externalSignal) externalSignal.removeEventListener("abort", abortExternal);
     }
   }
 
@@ -858,11 +875,19 @@ function createChatController(options) {
         return;
       }
     }
+    let requestTools = tools;
+    if (hooks.getAgentCapacity && tools.some((tool) => tool.function.name === "agent")) {
+      const currentAgentTool = getEnabledDefinitions({ ...Settings.getToolSettings(), agent: true }, hooks.getAgentCapacity())
+        .find((tool) => tool.function.name === "agent");
+      if (currentAgentTool) {
+        requestTools = tools.map((tool) => tool.function.name === "agent" ? currentAgentTool : tool);
+      }
+    }
     const result = await provider.chat(
       messages, modelConfig.modelId, modelConfig.endpoint, apiKey,
       (chunk) => post({ type: "partialResponse", messageId, text: chunk }),
       signal,
-      tools.length > 0 ? tools : undefined,
+      requestTools.length > 0 ? requestTools : undefined,
       (thinking) => post({ type: "thinkingDelta", messageId, text: thinking }),
       reasoningEffort,
       modelConfig.requestParameters
@@ -911,15 +936,27 @@ function createChatController(options) {
               const toolName = parts.slice(2).join("__");
               toolResult = await callMcpTool(serverId, toolName, toolArgs);
             } else if (tc.function.name === "agent") {
-              // Approving the agent call trusts everything its sub-agents do
-              toolResult = await runSubAgents({
-                tasks: toolArgs.tasks || [],
-                modelConfig,
-                apiKey,
-                provider,
-                budget,
-                reasoningEffort,
-              });
+              // Approving the agent call trusts everything its sub-agents do.
+              // The manager reserves available slots atomically before creating
+              // visible child chats and returns their joined results.
+              if (hooks.runAgent && !isAgent) {
+                toolResult = await hooks.runAgent({
+                  parentChatId: chatId,
+                  tasks: toolArgs.tasks || [],
+                  modelConfig,
+                  apiKey,
+                  provider,
+                  budget,
+                  reasoningEffort,
+                  signal,
+                });
+              } else if (isAgent) {
+                toolResult = "Error: agents cannot recursively spawn sub-agents.";
+              } else {
+                toolResult = await runSubAgents({
+                  tasks: toolArgs.tasks || [], modelConfig, apiKey, provider, budget, reasoningEffort, signal,
+                });
+              }
             } else {
               toolResult = await executeToolCall(
                 tc.function.name,
@@ -1092,6 +1129,7 @@ function createChatController(options) {
     }
     // Any tool calls waiting on approval belong to the cancelled request
     approvals.rejectAll("Request cancelled");
+    for (const agent of ownedAgents) agent.cancel();
     activity.end(chatId);
   }
 
@@ -1138,6 +1176,7 @@ function createChatController(options) {
           post({ type: "sessionSwitched", sessionId: currentSession });
         }
         post({ type: "historyRestored", messages: conversation });
+        if (hooks.getAgentCapacity) post({ type: "agentCapacityChanged", capacity: hooks.getAgentCapacity() });
         break;
       case "sendMessage":
         void handleSendMessage(msg.messageId, msg.text, msg.images, msg.editingId);
@@ -1188,6 +1227,7 @@ function createChatController(options) {
    */
   function abortAll() {
     handleCancel();
+    if (hooks.abortOwnedAgents) hooks.abortOwnedAgents();
     approvals.dispose();
   }
 
@@ -1204,6 +1244,9 @@ function createChatController(options) {
 
   // ── initial state ──
 
+  if (initialModelId && Settings.getModels().some((model) => model.id === initialModelId)) {
+    activeModel = initialModelId;
+  }
   if (options.sessionId) {
     const session = findSession(options.sessionId);
     loadIntoMemory(options.sessionId, session);
@@ -1211,6 +1254,10 @@ function createChatController(options) {
     restoreCurrentSession();
   } else {
     refreshModelChoiceFromSession();
+    if (initialModelId && Settings.getModels().some((model) => model.id === initialModelId)) {
+      activeModel = initialModelId;
+      if (options.reasoningEffort) reasoningEffort = options.reasoningEffort;
+    }
   }
 
   return {
@@ -1229,7 +1276,37 @@ function createChatController(options) {
     getSessionId: () => currentSession,
     getModelId: () => activeModel,
     getReasoningEffort: () => reasoningEffort,
+    getLastAssistantResponse: () => {
+      const lastAssistant = [...conversation].reverse().find((message) => message.role === "assistant");
+      return lastAssistant && typeof lastAssistant.content === "string" ? lastAssistant.content : "";
+    },
     isBusy: () => abortController !== null,
+    registerOwnedAgent: (agent) => {
+      ownedAgents.add(agent);
+      return () => ownedAgents.delete(agent);
+    },
+    onAgentCapacityChanged: () => {
+      const capacity = hooks.getAgentCapacity ? hooks.getAgentCapacity() : null;
+      if (sink && capacity) post({ type: "agentCapacityChanged", capacity });
+    },
+    runAgentTask: async (options) => {
+      await handleSendMessage("agent-progress", String(options.task), [], undefined, options.signal);
+      if (options.signal && options.signal.aborted) {
+        const error = new Error("Aborted");
+        error.name = "AbortError";
+        throw error;
+      }
+      const finalMessage = [...conversation].reverse().find((message) => message.role === "assistant");
+      return finalMessage && typeof finalMessage.content === "string" ? finalMessage.content : "(no output)";
+    },
+    postAgentProgress: (text) => post({ type: "toolStatus", text }),
+    postAgentChunk: (text) => post({ type: "partialResponse", messageId: "agent-progress", text }),
+    completeAgentTask: (text) => {
+      conversation.push({ role: "assistant", content: text });
+      void saveSession();
+      post({ type: "responseComplete", messageId: "agent-progress" });
+    },
+    failAgentTask: (message) => post({ type: "error", messageId: "agent-progress", error: message }),
   };
 }
 

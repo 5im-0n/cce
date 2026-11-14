@@ -766,6 +766,7 @@
   </div>
   <script>
     var vscode = acquireVsCodeApi();
+    var agentCapacity = null;
     var messagesEl = document.getElementById("messages");
     var textarea = document.getElementById("userInput");
     var sendBtn = document.getElementById("sendBtn");
@@ -1547,6 +1548,13 @@
             addMsg("error", "Attachment error: " + err.name + " - " + err.error);
           });
         }
+      } else if (m.type === "agentCapacityChanged") {
+        agentCapacity = m.capacity;
+      } else if (m.type === "persistPanelState") {
+        // Editor tabs only: remember which session this tab shows. VS Code
+        // keeps this value across a window reload and hands it back to the
+        // extension, which reopens the same conversation in the same tab.
+        vscode.setState({ sessionId: m.sessionId || null });
       }
     });
 

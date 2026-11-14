@@ -19,14 +19,17 @@ const MAX_TOOL_ROUNDS = 10; // Prevent infinite loops
 
 /**
  * @typedef {Object} AgentRunOptions
- * @property {Array<string>} tasks
+ * @property {Array<string>} [tasks]
+ * @property {string} [task] - A single task when run inside a visible agent tab.
  * @property {string} reasoningEffort - "off" | "low" | "medium" | "high" | "max"
  * @property {import("../config/Settings").ModelConfig} modelConfig
  * @property {string} apiKey
  * @property {import("../providers/registry").Provider} provider
  * @property {number} [budget] - per-request token budget from the loop guard
+ * @property {AbortSignal} [signal] - Parent cancellation signal.
+ * @property {(text: string) => void} [onProgress] - Forward visible progress to the agent chat.
+ * @property {(text: string) => void} [onChunk] - Forward streamed model text.
  */
-
 /**
  * Run every task in parallel and join the results.
  *
@@ -34,7 +37,7 @@ const MAX_TOOL_ROUNDS = 10; // Prevent infinite loops
  * @returns {Promise<string>}
  */
 async function runSubAgents(options) {
-  const { tasks, modelConfig, apiKey, provider, budget, reasoningEffort } = options;
+  const { tasks, modelConfig, apiKey, provider, budget, reasoningEffort, signal, onProgress, onChunk } = options;
   if (!tasks || tasks.length === 0) return "No tasks provided.";
 
   let subTools = getEnabledDefinitions(Settings.getToolSettings())
@@ -49,6 +52,8 @@ async function runSubAgents(options) {
   }
 
   log.appendLine("Agent: spawning " + tasks.length + " sub-agents with " + subTools.length + " tools");
+  const report = (text) => { if (onProgress) onProgress(text); };
+  report("Starting agent run with " + tasks.length + " task(s).");
 
   const results = await Promise.all(tasks.map(async (task, i) => {
     try {
@@ -61,6 +66,7 @@ async function runSubAgents(options) {
         // Loop guard: sub-agent requests accumulate their own tool rounds,
         // so prune/stop against the same budget as the main loop.
         if (typeof budget === "number" && budget > 0) {
+          if (signal && signal.aborted) throw createAbortError();
           const guard = pruneRounds(messages, budget);
           if (guard.overBudget) {
             const roundsDone = messages.filter((m) => m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0).length;
@@ -73,8 +79,11 @@ async function runSubAgents(options) {
         const result = await provider.chat(
           messages,
           modelConfig.modelId, modelConfig.endpoint, apiKey,
-          () => {}, // no streaming for sub-agents
-          new AbortController().signal,
+          (chunk) => {
+            if (onChunk) onChunk(chunk);
+            report(chunk);
+          },
+          signal || new AbortController().signal,
           subTools.length > 0 ? subTools : undefined,
           undefined, // no thinking callback for sub-agents
           reasoningEffort,
@@ -83,7 +92,9 @@ async function runSubAgents(options) {
 
         // If the model returned tool calls, execute them and loop
         if (result.toolCalls && result.toolCalls.length > 0) {
-          log.appendLine("Agent task " + (i + 1) + " round " + round + ": " + result.toolCalls.length + " tool call(s)");
+          const summary = "Agent task " + (i + 1) + " round " + round + ": " + result.toolCalls.length + " tool call(s)";
+          log.appendLine(summary);
+          report("\n\n" + summary + "\n");
           messages.push({ role: "assistant", content: null, tool_calls: result.toolCalls });
 
           for (const tc of result.toolCalls) {
@@ -139,11 +150,18 @@ async function runSubAgents(options) {
       );
       return "Task " + (i + 1) + " result (max rounds reached):\n" + (finalResult.text || "(no output)");
     } catch (e) {
+      if (signal && signal.aborted) throw createAbortError();
       return "Task " + (i + 1) + " error: " + (e instanceof Error ? e.message : String(e));
     }
   }));
 
   return results.join("\n\n");
+}
+
+function createAbortError() {
+  const error = new Error("Aborted");
+  error.name = "AbortError";
+  return error;
 }
 
 module.exports = { runSubAgents, MAX_TOOL_ROUNDS };

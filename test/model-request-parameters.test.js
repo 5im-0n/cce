@@ -38,6 +38,15 @@ function setup(t, initialModels = []) {
 const config = { name: "Router", provider: "openai", modelId: "test", endpoint: "https://openrouter.ai/api/v1" };
 const parameters = { provider: { quantizations: ["fp16", "bf16"] }, reasoning: { effort: "xHigh" } };
 
+test("maximum simultaneous agent setting defaults to three and clamps to one through ten", async (t) => {
+  setup(t);
+  assert.equal(Settings.getMaxSimultaneousAgents(), 3);
+  await Settings.setMaxSimultaneousAgents(0);
+  assert.equal(Settings.getMaxSimultaneousAgents(), 1);
+  await Settings.setMaxSimultaneousAgents(12);
+  assert.equal(Settings.getMaxSimultaneousAgents(), 10);
+});
+
 test("adding a model persists parameters and acknowledges saving without exposing its key", async (t) => {
   const storage = setup(t);
   await ModelConfigPanel._addModel({ ...config, apiKey: "secret", requestParameters: parameters });

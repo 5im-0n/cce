@@ -26,6 +26,11 @@ const REASONING_EFFORT_KEY = "cce.reasoningEffort";
 const MCP_KEY = "cce.mcpServers";
 const API_KEY_PREFIX = "cce.apiKey.";
 const COMPACTION_KEY = "cce.compaction";
+const MAX_SIMULTANEOUS_AGENTS_KEY = "cce.maxSimultaneousAgents";
+const AUTO_CLOSE_AGENTS_KEY = "cce.autoCloseAgents";
+const DEFAULT_MAX_SIMULTANEOUS_AGENTS = 3;
+const MIN_SIMULTANEOUS_AGENTS = 1;
+const MAX_SIMULTANEOUS_AGENTS = 10;
 
 /**
  * Must be called once during activate() with the extension context.
@@ -159,6 +164,44 @@ async function setToolApprovalMode(toolName, mode) {
   const modes = getToolApprovalModes();
   modes[toolName] = mode;
   await _ctx.globalState.update(APPROVAL_MODES_KEY, modes);
+}
+
+/**
+ * Maximum number of concurrently running sub-agents.
+ * @returns {number}
+ */
+function getMaxSimultaneousAgents() {
+  const value = _ctx.globalState.get(MAX_SIMULTANEOUS_AGENTS_KEY, DEFAULT_MAX_SIMULTANEOUS_AGENTS);
+  if (!Number.isInteger(value)) return DEFAULT_MAX_SIMULTANEOUS_AGENTS;
+  return Math.min(MAX_SIMULTANEOUS_AGENTS, Math.max(MIN_SIMULTANEOUS_AGENTS, value));
+}
+
+/**
+ * Set the maximum number of concurrently running sub-agents. Values are clamped
+ * to the supported range so invalid settings cannot disable the safety limit.
+ * @param {number} value
+ */
+async function setMaxSimultaneousAgents(value) {
+  const numericValue = Number(value);
+  const normalized = Number.isFinite(numericValue)
+    ? Math.min(MAX_SIMULTANEOUS_AGENTS, Math.max(MIN_SIMULTANEOUS_AGENTS, Math.floor(numericValue)))
+    : DEFAULT_MAX_SIMULTANEOUS_AGENTS;
+  await _ctx.globalState.update(MAX_SIMULTANEOUS_AGENTS_KEY, normalized);
+}
+
+/**
+ * Whether completed sub-agent tabs should close automatically.
+ * @returns {boolean}
+ */
+function getAutoCloseAgents() {
+  return _ctx.globalState.get(AUTO_CLOSE_AGENTS_KEY, false) === true;
+}
+
+/**
+ * @param {boolean} enabled
+ */
+async function setAutoCloseAgents(enabled) {
+  await _ctx.globalState.update(AUTO_CLOSE_AGENTS_KEY, enabled === true);
 }
 
 /**
@@ -427,5 +470,5 @@ async function setMcpServers(servers) {
   await _ctx.globalState.update(MCP_KEY, servers);
 }
 
-module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getToolApprovalModes, setToolApprovalMode, getMcpApprovalModes, setMcpApprovalMode, clearMcpApprovalMode, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, mutateSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers, getCompaction, setCompaction };
+module.exports = { init, getModels, setModels, getDefaultModel, setDefaultModel, getApiKey, setApiKey, getSystemPrompt, setSystemPrompt, getToolSettings, setToolEnabled, getToolApprovalModes, setToolApprovalMode, getMaxSimultaneousAgents, setMaxSimultaneousAgents, getAutoCloseAgents, setAutoCloseAgents, getMcpApprovalModes, setMcpApprovalMode, clearMcpApprovalMode, getContextFlags, setContextFlag, getUseAgentsMd, setUseAgentsMd, getAgentsMdPath, setAgentsMdPath, getSessions, mutateSessions, getCurrentSessionId, setCurrentSessionId, getSessionsMaxAge, setSessionsMaxAge, getAllSessions, deleteSession, deleteExpiredSessions, getReasoningEffort, setReasoningEffort, getMcpServers, setMcpServers, getCompaction, setCompaction };
 

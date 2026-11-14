@@ -99,3 +99,17 @@ test("getEnabledDefinitions still filters and maps as before", () => {
   const withAgent = getEnabledDefinitions({ agent: true });
   assert.ok(withAgent.find((t) => t.function.name === "agent"));
 });
+
+test("agent definition tells the model current simultaneous capacity", () => {
+  const tools = getEnabledDefinitions({ agent: true }, { available: 2, maximum: 3 });
+  const agent = tools.find((tool) => tool.function.name === "agent");
+  assert.match(agent.function.description, /2 of 3 additional agents/);
+  assert.equal(agent.function.parameters.properties.tasks.maxItems, 2);
+});
+
+test("agent definition clamps advertised capacity", () => {
+  const tools = getEnabledDefinitions({ agent: true }, { available: 99, maximum: 3 });
+  const agent = tools.find((tool) => tool.function.name === "agent");
+  assert.match(agent.function.description, /3 of 3 additional agents/);
+  assert.equal(agent.function.parameters.properties.tasks.maxItems, 3);
+});
