@@ -24,7 +24,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: "read_file",
       description:
-        "Read a file from the workspace. Returns line numbers and content. Files over 500 lines are truncated unless offset/limit is used.",
+        "Read a file from the workspace. Returns line numbers and complete line content. Reads 500 lines by default, up to 2000 lines per call. Use offset/limit to read other ranges.",
       parameters: {
         type: "object",
         properties: {
@@ -38,7 +38,7 @@ const TOOL_DEFINITIONS = [
           },
           limit: {
             type: "number",
-            description: "Maximum number of lines to read. Defaults to 500.",
+            description: "Maximum number of lines to read. Defaults to 500; capped at 2000.",
           },
         },
         required: ["path"],

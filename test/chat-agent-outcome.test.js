@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const Module = require("node:module");
+const { truncateToolResult } = require("../src/context/guard");
 
 /**
  * What a chat tells the host when a turn ends.
@@ -49,6 +50,7 @@ async function settle(rounds = 10) {
  * @param {Object} [options]
  * @param {(signal: AbortSignal | undefined) => Promise<any>} [options.chat]
  * @param {boolean} [options.isAgent]
+ * @param {string} [options.toolResult] - Result returned by built-in and MCP tool stubs.
  * @param {boolean} [options.overBudget] - The loop guard reports over budget.
  * @param {"ask"|"auto"|"off"} [options.compactionMode]
  */
@@ -96,9 +98,9 @@ function setup(options = {}) {
         return [];
       },
     },
-    [file("src/tools/executor.js")]: { executeToolCall: async () => "" },
+    [file("src/tools/executor.js")]: { executeToolCall: async () => options.toolResult || "" },
     [file("src/tools/shellInfo.js")]: { describeShellBrief: () => "" },
-    [file("src/mcp/client.js")]: { fetchMcpTools: async () => [], callMcpTool: async () => "" },
+    [file("src/mcp/client.js")]: { fetchMcpTools: async () => [], callMcpTool: async () => options.toolResult || "" },
     [file("src/context/compact.js")]: {
       planCompaction: () => ({
         shouldCompact: Boolean(options.compactionMode && options.compactionMode !== "off"),
@@ -120,7 +122,7 @@ function setup(options = {}) {
         estimate: options.overBudget === true ? 5000 : 0,
         freedTokens: 0,
       }),
-      truncateToolResult: (text) => text,
+      truncateToolResult,
       countToolCalls: () => ({}),
     },
     [file("src/conversation/edit.js")]: { applyEdit: () => ({ ok: false }), lastUserMessageIndex: () => -1 },
@@ -287,6 +289,45 @@ test("an agent run refuses to spawn sub-agents, and says why", async () => {
   const toolMessage = requests[requests.length - 1].find((m) => m.role === "tool");
   assert.match(String(toolMessage.content), /cannot recursively spawn sub-agents/);
 });
+
+for (const toolName of ["read_file", "search_code", "mcp__server__read_file"]) {
+  test(`${toolName} applies the correct result limit in the next provider request`, async (t) => {
+    const toolResult = Array.from({ length: 500 }, (_, i) => `${i + 1}: ${"x".repeat(80)}`).join("\n");
+    assert.ok(toolResult.length > 25000);
+    let rounds = 0;
+    let received;
+    const { controller, posted } = setup({
+      toolResult,
+      chat: async (...args) => {
+        rounds++;
+        if (rounds === 1) {
+          return {
+            text: "",
+            toolCalls: [{ id: "read-result", function: { name: toolName, arguments: "{}" } }],
+          };
+        }
+        received = args[0].find((m) => m.role === "tool" && m.tool_call_id === "read-result");
+        return { text: "done" };
+      },
+    });
+    t.after(() => controller.dispose());
+
+    const outcome = await controller.runAgentTask({ task: "read the tool result" });
+
+    assert.equal(outcome.ok, true);
+    assert.equal(rounds, 2);
+    assert.ok(received, "the provider must receive the tool response");
+    if (toolName === "read_file") {
+      assert.equal(received.content, toolResult, "every requested line reaches the model intact");
+    } else {
+      assert.equal(received.content, truncateToolResult(toolResult));
+      assert.notEqual(received.content, toolResult, "other tools keep their character cap");
+      assert.match(received.content, /truncated/);
+    }
+    const preview = posted.find((m) => m.type === "toolCall" && m.toolId === "read-result");
+    assert.equal(preview.result, toolResult.slice(0, 2000), "the UI preview limit is unchanged");
+  });
+}
 
 test("the outcome of a real run maps onto the report the parent model reads", async () => {
   const { formatAgentReport } = require("../src/chat/agent-run");

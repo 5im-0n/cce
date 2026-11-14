@@ -1069,7 +1069,10 @@ function createChatController(options) {
           result: String(toolResult).slice(0, 2000),
         });
 
-        messages.push({ role: "tool", tool_call_id: tc.id, content: truncateToolResult(toolResult) });
+        // read_file already caps its line count; a character cutoff would
+        // silently discard requested lines (or cut a long line in half).
+        const content = tc.function.name === "read_file" ? String(toolResult) : truncateToolResult(toolResult);
+        messages.push({ role: "tool", tool_call_id: tc.id, content });
       }
       await chatLoop(messageId, messages, modelConfig, apiKey, provider, tools, budget);
       return;

@@ -53,10 +53,12 @@ async function executeToolCall(toolName, args, signal, onProgress) {
 // ── tool implementations ───────────────────────────────────
 
 /**
+ * Read a numbered range without truncating individual lines.
  * @param {string} root
  * @param {string} filePath
- * @param {number} [offset] - 1-based line number to start from
- * @param {number} [limit] - Maximum number of lines to read
+ * @param {number} [offset] - 1-based line number to start from (default 1)
+ * @param {number} [limit] - Lines to read (default 500, maximum 2000)
+ * @returns {string}
  */
 function readFile(root, filePath, offset, limit) {
   const fullPath = path.resolve(root, filePath);
@@ -72,19 +74,26 @@ function readFile(root, filePath, offset, limit) {
   const lines = content.split("\n");
   const totalLines = lines.length;
 
-  const start = Math.max(0, (offset || 1) - 1);
-  const end = limit ? start + limit : Math.min(start + 2000, totalLines);
+  const start = typeof offset === "number" && Number.isFinite(offset) && offset > 0
+    ? Math.max(1, Math.floor(offset)) - 1 : 0;
+  const lineLimit = typeof limit === "number" && Number.isFinite(limit) && limit > 0
+    ? Math.min(2000, Math.max(1, Math.floor(limit))) : 500;
+  const end = Math.min(start + lineLimit, totalLines);
   const slice = lines.slice(start, end);
 
   // Number the lines
   const numbered = slice.map((l, i) => `${start + i + 1}: ${l}`).join("\n");
 
   let result = `File: ${filePath} (${totalLines} lines total`;
-  if (totalLines > slice.length) {
-    result += `, showing lines ${start + 1}-${Math.min(end, totalLines)}`;
+  if (slice.length === 0) {
+    result += ", no lines in requested range";
+  } else if (totalLines > slice.length) {
+    result += `, showing lines ${start + 1}-${end}`;
   }
   result += `)\n${numbered}`;
-  return limitResult(result, `... (${totalLines} lines total)`);
+  // The line limit above is authoritative; don't cut requested lines or
+  // individual long lines with the generic line/character limiter.
+  return result;
 }
 
 /**
@@ -487,23 +496,6 @@ function killProcessTree(pid) {
 }
 
 // ── helpers ────────────────────────────────────────────────
-
-/**
- * Truncate a result to a reasonable size (100 lines / 8000 chars).
- * @param {string} text
- * @param {string} suffix
- * @returns {string}
- */
-function limitResult(text, suffix) {
-  const lines = text.split("\n");
-  if (lines.length > 100) {
-    return lines.slice(0, 100).join("\n") + "\n" + suffix;
-  }
-  if (text.length > 8000) {
-    return text.slice(0, 8000) + "\n" + suffix;
-  }
-  return text;
-}
 
 /**
  * Truncate text to a maximum length.
