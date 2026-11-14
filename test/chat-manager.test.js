@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const Module = require("node:module");
+const { getEventListeners } = require("node:events");
 
 /**
  * Chat manager orchestration, with VS Code and the controller stubbed.
@@ -48,7 +49,10 @@ test.after(() => {
  * @param {(options: any) => Promise<any>} [options.agentTaskRunner] - Resolves
  *   to a TurnOutcome (or a string, treated as a completed turn with that text).
  * @param {boolean} [options.autoCloseAgents] - The `AutoCloseAgents` setting.
- * @param {() => void} [options.onAgentTaskFinished] - Called when a run settles.
+ * @param {number} [options.maxAgents] - Global agent capacity.
+ * @param {(config: any) => void} [options.onCreateController] - Controller setup hook.
+ * @param {() => void} [options.onCreatePanel] - Panel setup hook.
+ * @param {(agent: { cancel: () => void }) => void} [options.onRegisterOwnedAgent] - Registration hook.
  */
 function setup(options = {}) {
   const sessions = options.sessions || [];
@@ -73,6 +77,7 @@ function setup(options = {}) {
           return { dispose() {} };
         },
         createWebviewPanel: (viewType, title, column, panelOptions) => {
+          if (options.onCreatePanel) options.onCreatePanel();
           const panel = {
             viewType,
             title,
@@ -156,12 +161,17 @@ function setup(options = {}) {
     },
     [file("src/chat/controller.js")]: {
       createChatController: (config) => {
+        if (options.onCreateController) options.onCreateController(config);
+        const ownedAgents = new Set();
         const state = {
           id: config.id,
           sessionId: config.sessionId || null,
           title: "Chat",
           disposed: false,
           saved: 0,
+          abortCalls: 0,
+          pendingApprovals: 0,
+          ownedAgents,
           sink: null,
         };
         if (config.sessionId) config.hooks.onSessionTaken(config.sessionId);
@@ -188,7 +198,11 @@ function setup(options = {}) {
             if (msg && msg.type === "cancelMessage" && config.hooks.onSelfStop) config.hooks.onSelfStop();
           },
           onAgentCapacityChanged: () => {},
-          registerOwnedAgent: () => () => {},
+          registerOwnedAgent: (agent) => {
+            if (options.onRegisterOwnedAgent) options.onRegisterOwnedAgent(agent);
+            ownedAgents.add(agent);
+            return () => { ownedAgents.delete(agent); };
+          },
           // Mirrors the real controller: resolves to a TurnOutcome. A string
           // runner result is shorthand for a completed turn with that text.
           runAgentTask: async (agentOptions) => {
@@ -211,8 +225,12 @@ function setup(options = {}) {
           postModels: () => emit({ type: "modelsLoaded", models: [], activeModel: null }),
           postSessions: () => emit({ type: "sessionsLoaded", sessions: [], currentSessionId: state.sessionId || "" }),
           abortAll: () => {
-            // Mirrors the real controller: cancelling a chat cancels the agents
-            // it spawned.
+            state.abortCalls++;
+            // The real parent aborts its request signal BEFORE cancelling owned
+            // agents. Signal propagation alone does not deny child approvals.
+            if (state.requestAbortController) state.requestAbortController.abort();
+            state.pendingApprovals = 0;
+            for (const agent of ownedAgents) agent.cancel();
             if (config.hooks.abortOwnedAgents) config.hooks.abortOwnedAgents();
           },
           forgetSession: () => {},
@@ -410,6 +428,240 @@ test("stopping the parent still cancels and closes its agent tabs", async () => 
   assert.equal(panels[0].disposed, true, "the agent tab is closed with the request that spawned it");
   assert.match(result, /stopped before it finished/);
   assert.match(result, /parent request was stopped/);
+});
+
+/** Build ordinary visible-agent options for manager lifecycle regressions. */
+function agentRunOptions(overrides = {}) {
+  return {
+    parentChatId: "sidebar",
+    tasks: ["inspect A"],
+    modelConfig: { id: "m-one", modelId: "model-one", endpoint: "https://example.invalid" },
+    apiKey: "",
+    provider: {},
+    reasoningEffort: "medium",
+    ...overrides,
+  };
+}
+
+/** A job that ignores cancellation until the test explicitly settles it. */
+function deferredJob() {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
+test("parent signal aborts first but owned-agent cancellation still cleans approvals and closes the tab", async () => {
+  const job = deferredJob();
+  let childSignal;
+  const { manager, panels, controllers } = setup({
+    maxAgents: 1,
+    agentTaskRunner: ({ signal }) => {
+      childSignal = signal;
+      return job.promise;
+    },
+  });
+  const parent = manager.getSidebarChat();
+  parent.state.requestAbortController = new AbortController();
+  const run = manager.runVisibleAgents(agentRunOptions({ signal: parent.state.requestAbortController.signal }));
+  const child = controllers.get("tab-1");
+  child.state.pendingApprovals = 1;
+
+  // This mirrors handleCancel: first abort the request (and hence the child's
+  // signal), then invoke registered cancellations and the manager hook.
+  parent.abortAll();
+  assert.equal(childSignal.aborted, true);
+  assert.ok(child.state.abortCalls > 0, "an already-aborted signal must not skip abortAll");
+  assert.equal(child.state.pendingApprovals, 0, "pending approval is denied");
+  assert.equal(panels[0].disposed, true, "parent cancellation still closes the tab");
+  const abortCalls = child.state.abortCalls;
+  parent.abortAll();
+  assert.equal(child.state.abortCalls, abortCalls, "repeated cancellation does not repeat cleanup");
+  assert.equal(child.state.saved, 1, "tab closure is not repeated");
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(child.state.disposed, true);
+  assert.equal(manager.getAgentCapacity().available, 0, "abort/closure does not settle the job");
+  assert.equal(parent.state.ownedAgents.size, 1, "retain cancellation ownership until settlement");
+  job.resolve("late result");
+  assert.match(await run, /parent request was stopped/);
+  assert.equal(parent.state.ownedAgents.size, 0);
+  assert.equal(manager.getAgentCapacity().available, 1);
+});
+
+test("agent Stop is idempotent and a later parent Stop can still close its tab", async () => {
+  const job = deferredJob();
+  const { manager, panels, controllers } = setup({ maxAgents: 1, agentTaskRunner: () => job.promise });
+  const parent = manager.getSidebarChat();
+  const run = manager.runVisibleAgents(agentRunOptions());
+  const child = controllers.get("tab-1");
+  child.state.pendingApprovals = 1;
+
+  child.handleMessage({ type: "cancelMessage" });
+  child.handleMessage({ type: "cancelMessage" });
+  assert.equal(child.state.abortCalls, 1);
+  assert.equal(child.state.pendingApprovals, 0);
+  assert.equal(panels[0].disposed, false, "local Stop keeps the transcript");
+  parent.abortAll();
+  assert.equal(panels[0].disposed, true, "parent Stop may escalate to tab closure");
+  const abortCalls = child.state.abortCalls;
+  parent.abortAll();
+  assert.equal(child.state.abortCalls, abortCalls);
+  assert.equal(child.state.saved, 1);
+  job.resolve("late result");
+  assert.match(await run, /the user stopped it/, "keep the first cancellation reason");
+  assert.equal(manager.getAgentCapacity().available, 1);
+});
+
+for (const closeParent of [false, true]) {
+  for (const rejects of [false, true]) {
+    test(`closing the ${closeParent ? "parent" : "agent"} tab retains capacity until the job ${rejects ? "rejects" : "resolves"}`, async () => {
+      const job = deferredJob();
+      const { manager, panels, controllers } = setup({ maxAgents: 1, agentTaskRunner: () => job.promise });
+      manager.getSidebarChat();
+      await manager.openChatTab();
+      const run = manager.runVisibleAgents(agentRunOptions({ parentChatId: "tab-1" }));
+      assert.equal(panels.length, 2);
+      assert.equal(manager.getAgentCapacity().available, 0);
+
+      panels[closeParent ? 0 : 1].dispose();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(controllers.get("tab-2").state.disposed, true, "agent is removed from open chats");
+      assert.equal(manager.getAgentCapacity().available, 0, "unsettled work still consumes its slot");
+      const denied = await manager.runVisibleAgents(agentRunOptions());
+      assert.match(denied, /No agents spawned: all 1 simultaneous-agent slot is in use/);
+      assert.equal(panels.length, 2, "another parent cannot bypass the occupied slot");
+
+      if (rejects) job.reject(new Error("late failure"));
+      else job.resolve("late result");
+      assert.match(await run, /stopped before it finished/);
+      assert.equal(manager.getAgentCapacity().available, 1);
+      await manager.runVisibleAgents(agentRunOptions());
+      assert.equal(panels.length, 3, "a new job can start only after settlement");
+      assert.equal(manager.getAgentCapacity().available, 1);
+    });
+  }
+}
+
+test("all accepted slots are reserved before controller setup and concurrent parent calls", async () => {
+  const jobs = [deferredJob(), deferredJob()];
+  let manager;
+  let competingRun;
+  let setups = 0;
+  let started = 0;
+  const env = setup({
+    maxAgents: 2,
+    onCreateController: (config) => {
+      if (!config.isAgent) return;
+      assert.equal(manager.getAgentCapacity().available, 0, "the entire batch was reserved before construction");
+      if (setups++ === 0) competingRun = manager.runVisibleAgents(agentRunOptions({ parentChatId: "tab-1" }));
+    },
+    agentTaskRunner: () => jobs[started++].promise,
+  });
+  manager = env.manager;
+  manager.getSidebarChat();
+  await manager.openChatTab();
+  const run = manager.runVisibleAgents(agentRunOptions({ tasks: ["A", "B"] }));
+  assert.match(await competingRun, /No agents spawned/);
+  assert.equal(started, 2);
+  assert.equal(env.panels.length, 3);
+  jobs[0].resolve("first result");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(manager.getAgentCapacity().available, 1, "each job releases independently of its sibling");
+  jobs[1].resolve("second result");
+  await run;
+  assert.equal(manager.getAgentCapacity().available, 2);
+});
+
+for (const failure of ["controller", "registration", "panel"]) {
+  test(`${failure} setup failure releases only its reservation and does not lose a running sibling`, async () => {
+    const job = deferredJob();
+    let failOnce = true;
+    const fail = () => {
+      if (!failOnce) return;
+      failOnce = false;
+      throw new Error(failure + " setup failed");
+    };
+    const { manager, panels, controllers } = setup({
+      maxAgents: 2,
+      onCreateController: (config) => { if (config.isAgent && failure === "controller") fail(); },
+      onRegisterOwnedAgent: () => { if (failure === "registration") fail(); },
+      onCreatePanel: () => { if (failure === "panel") fail(); },
+      agentTaskRunner: () => job.promise,
+    });
+    const parent = manager.getSidebarChat();
+    const signal = new AbortController().signal;
+    const run = manager.runVisibleAgents(agentRunOptions({ tasks: ["fails setup", "keeps running"], signal }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(manager.getAgentCapacity().available, 1);
+    assert.equal(panels.length, 1);
+    assert.equal(parent.state.ownedAgents.size, 1, "only the live sibling stays registered");
+    if (failure !== "controller") assert.equal(controllers.get("tab-1").state.disposed, true);
+    assert.equal(getEventListeners(signal, "abort").length, 1);
+
+    job.resolve("sibling result");
+    const result = await run;
+    assert.match(result, new RegExp(failure + " setup failed"));
+    assert.match(result, /Agent 2 result:\nsibling result/);
+    assert.equal(manager.getAgentCapacity().available, 2);
+    assert.equal(parent.state.ownedAgents.size, 0);
+    assert.equal(getEventListeners(signal, "abort").length, 0);
+    await manager.runVisibleAgents(agentRunOptions({ tasks: ["retry A", "retry B"] }));
+    assert.equal(panels.length, 3, "all failed-setup capacity can be reused");
+  });
+}
+
+test("cancellation during registration releases skipped jobs and removes their listeners", async () => {
+  const parentAbort = new AbortController();
+  let started = 0;
+  const { manager, panels, controllers } = setup({
+    maxAgents: 2,
+    onRegisterOwnedAgent: () => parentAbort.abort(),
+    agentTaskRunner: async () => { started++; return "unexpected"; },
+  });
+  const parent = manager.getSidebarChat();
+  const result = await manager.runVisibleAgents(agentRunOptions({ tasks: ["A", "B"], signal: parentAbort.signal }));
+  assert.match(result, /2 of 2 sub-agents did not finish/);
+  assert.equal(started, 0);
+  assert.equal(panels.length, 0);
+  assert.equal(controllers.get("tab-1").state.disposed, true);
+  assert.equal(parent.state.ownedAgents.size, 0);
+  assert.equal(getEventListeners(parentAbort.signal, "abort").length, 0);
+  assert.equal(manager.getAgentCapacity().available, 2);
+});
+
+test("closing a parent during panel setup releases cancelled reservations without starting work", async () => {
+  const parentAbort = new AbortController();
+  let manager;
+  let parentPanel;
+  let panelsCreated = 0;
+  let started = 0;
+  const env = setup({
+    maxAgents: 2,
+    onCreatePanel: () => {
+      if (++panelsCreated !== 2) return;
+      parentPanel.dispose();
+      assert.equal(manager.getAgentCapacity().available, 0, "closing a parent does not discard reserved slots");
+    },
+    agentTaskRunner: async () => { started++; return "unexpected"; },
+  });
+  manager = env.manager;
+  await manager.openChatTab();
+  env.controllers.get("tab-1").state.requestAbortController = parentAbort;
+  parentPanel = env.panels[0];
+  const result = await manager.runVisibleAgents(agentRunOptions({
+    parentChatId: "tab-1", tasks: ["A", "B"], signal: parentAbort.signal,
+  }));
+  assert.match(result, /2 of 2 sub-agents did not finish/);
+  assert.equal(started, 0);
+  assert.equal(env.panels.length, 2, "the second cancelled task never opens a panel");
+  assert.ok(env.panels.every((panel) => panel.disposed), "the panel created during cancellation is also closed");
+  assert.equal(env.controllers.get("tab-1").state.ownedAgents.size, 0);
+  assert.equal(getEventListeners(parentAbort.signal, "abort").length, 0);
+  assert.equal(manager.getAgentCapacity().available, 2);
 });
 
 test("a cancelled parent leaves no agent tab behind", async () => {

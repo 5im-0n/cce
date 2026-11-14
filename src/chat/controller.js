@@ -614,179 +614,184 @@ function createChatController(options) {
    * @returns {Promise<import("./agent-run").TurnOutcome>}
    */
   async function handleSendMessage(messageId, text, images, editingId, externalSignal) {
-    /** @param {string} message */
-    const fail = (message) => {
-      postError(messageId, message);
+    /**
+     * @param {string} message
+     * @param {boolean} [turnRejected] - Preserve the running turn's UI on overlap.
+     */
+    const fail = (message, turnRejected = false) => {
+      post({ type: "error", messageId, error: message, turnRejected });
       return /** @type {import("./agent-run").TurnOutcome} */ ({ ok: false, aborted: false, error: message, text: "" });
     };
 
-    const models = Settings.getModels();
-    const modelConfig = models.find((m) => m.id === activeModel) || models[0];
-    if (!modelConfig) return fail("No model configured. Click the settings gear to add one.");
-    activeModel = modelConfig.id;
+    if (disposed) return fail("This chat is closed.");
+    if (abortController) return fail("Wait for the current response to finish before sending or editing.", true);
 
-    const apiKey = (await Settings.getApiKey(modelConfig.id)) || "";
-    const provider = getProvider(modelConfig.provider);
-    if (!provider) return fail("Unknown provider: " + modelConfig.provider);
-    if (editingId) {
-      // Edit confirm: replace the most recent user message in place and drop
-      // everything after it (the old reply and any tool activity). The edit
-      // is persisted before the request runs, so an aborted regeneration
-      // still keeps the truncation. Pending approvals belonged to the turn
-      // being discarded, so they are rejected.
-      if (abortController) return fail("Wait for the current response to finish before editing.");
-      const result = applyEdit(conversation, editingId, text, images || []);
-      if (!result.ok) return fail("Can't edit message: " + result.reason);
-      approvals.rejectAll("Message edited");
-      conversation = result.conversation;
-      // Editing truncates the conversation; the summary must not reach past
-      // the new end. (The summary may now describe messages that were edited
-      // away — mildly stale, but harmless and keeps the compaction benefit.)
-      summaryCoversUpTo = Math.min(summaryCoversUpTo, conversation.length);
-      ensureSession();
-      await saveSession();
-      post({ type: "historyRestored", messages: conversation });
-    } else {
-      conversation.push({ role: "user", content: text, images: images || [], id: messageId });
-      ensureSession();
-    }
-    // Reset the per-turn bookkeeping the outcome report reads.
+    // Claim the turn synchronously, before key retrieval, MCP discovery or any
+    // other await. Stop and a second send must see the same in-flight request.
+    const requestController = new AbortController();
+    const signal = requestController.signal;
+    abortController = requestController;
     turnStreamText = "";
     turnStopReason = null;
+    // External cancellation must release approval waits, not just abort fetch.
+    const abortExternal = () => handleCancel();
 
-    // Gather enabled tools. The manager's capacity callback includes all live
-    // agents across every chat, so the model sees current global capacity.
-    const toolSettings = { ...Settings.getToolSettings() };
-    if (agentRun) toolSettings.agent = false;
-    let tools = getEnabledDefinitions(toolSettings, hooks.getAgentCapacity ? hooks.getAgentCapacity() : undefined);
-
-    // Fetch MCP tools (both HTTP and stdio)
     try {
-      const mcpTools = await fetchMcpTools();
-      tools = tools.concat(mcpTools);
-    } catch (e) {
-      log.appendLine("MCP fetch FAILED: " + (e instanceof Error ? (e.stack || e.message) : String(e)));
-    }
+      if (externalSignal) {
+        if (externalSignal.aborted) abortExternal();
+        else externalSignal.addEventListener("abort", abortExternal, { once: true });
+      }
+      postBusy(true);
+      signal.throwIfAborted();
 
-    // Build system prompt with context flags and AGENTS.md
-    let systemPrompt = Settings.getSystemPrompt() || "";
+      const models = Settings.getModels();
+      const modelConfig = models.find((m) => m.id === activeModel) || models[0];
+      if (!modelConfig) return fail("No model configured. Click the settings gear to add one.");
+      activeModel = modelConfig.id;
 
-    // Inject AGENTS.md content if enabled
-    if (Settings.getUseAgentsMd()) {
+      const apiKey = (await Settings.getApiKey(modelConfig.id)) || "";
+      signal.throwIfAborted();
+      const provider = getProvider(modelConfig.provider);
+      if (!provider) return fail("Unknown provider: " + modelConfig.provider);
+      if (editingId) {
+        // Edit confirm: replace the most recent user message in place and drop
+        // everything after it (the old reply and any tool activity). The edit
+        // is persisted before the request runs, so an aborted regeneration
+        // still keeps the truncation. Pending approvals belonged to the turn
+        // being discarded, so they are rejected.
+        const result = applyEdit(conversation, editingId, text, images || []);
+        if (!result.ok) return fail("Can't edit message: " + result.reason);
+        approvals.rejectAll("Message edited");
+        conversation = result.conversation;
+        // Editing truncates the conversation; the summary must not reach past
+        // the new end. (The summary may now describe messages that were edited
+        // away — mildly stale, but harmless and keeps the compaction benefit.)
+        summaryCoversUpTo = Math.min(summaryCoversUpTo, conversation.length);
+        ensureSession();
+        await saveSession();
+        // The edit is already committed even if Stop arrived during saving.
+        // Replay it before unwinding so the UI matches the persisted transcript.
+        post({ type: "historyRestored", messages: conversation });
+        signal.throwIfAborted();
+      } else {
+        conversation.push({ role: "user", content: text, images: images || [], id: messageId });
+        ensureSession();
+      }
+
+      // Gather enabled tools. The manager's capacity callback includes all live
+      // agents across every chat, so the model sees current global capacity.
+      const toolSettings = { ...Settings.getToolSettings() };
+      if (agentRun) toolSettings.agent = false;
+      let tools = getEnabledDefinitions(toolSettings, hooks.getAgentCapacity ? hooks.getAgentCapacity() : undefined);
+
+      // Fetch MCP tools (both HTTP and stdio)
       try {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (workspaceFolders && workspaceFolders.length > 0) {
-          const agentsPath = path.join(workspaceFolders[0].uri.fsPath, Settings.getAgentsMdPath());
-          if (fs.existsSync(agentsPath)) {
-            const agentsContent = fs.readFileSync(agentsPath, "utf-8");
-            systemPrompt = "<!-- AGENTS.md / Project Instructions -->\n" + agentsContent + "\n\n" + systemPrompt;
-          }
-        }
+        const mcpTools = await fetchMcpTools();
+        tools = tools.concat(mcpTools);
       } catch (e) {
-        log.appendLine("Failed to read AGENTS.md: " + (e instanceof Error ? e.message : String(e)));
+        log.appendLine("MCP fetch FAILED: " + (e instanceof Error ? (e.stack || e.message) : String(e)));
       }
-    }
+      signal.throwIfAborted();
 
-    // Inject context flags
-    const contextFlags = Settings.getContextFlags();
-    const contextParts = [];
-    const now = new Date();
-    if (contextFlags.includeDate !== false) {
-      contextParts.push("Current date: " + now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }));
-    }
-    if (contextFlags.includeOS !== false) {
-      contextParts.push("Platform/OS: " + process.platform);
-      // Shell used by the run_command tool (child_process.exec), not the user's terminal
-      contextParts.push(describeShellBrief());
-    }
-    if (contextFlags.includeRegion !== false) {
-      contextParts.push("Locale: " + (Intl.DateTimeFormat().resolvedOptions().locale || "unknown") + ", Timezone: " + (Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown"));
-    }
-    if (contextParts.length > 0) {
-      systemPrompt = "<!-- Context -->\n" + contextParts.join("\n") + "\n\n" + systemPrompt;
-    }
+      // Build system prompt with context flags and AGENTS.md
+      let systemPrompt = Settings.getSystemPrompt() || "";
 
-    // Tools may require user approval before executing
-    if (tools.length > 0) {
-      systemPrompt +=
-        "\n\nImportant: Some tool calls require user approval. If a tool call is denied or returns an approval error, " +
-        "do not retry the same tool call. Adapt your answer based on the information you already have.";
-    }
-
-    // The abort controller is created up-front so the user's Stop button also
-    // cancels a compaction pass that may run before the main request.
-    abortController = new AbortController();
-    // Show Stop before the first token can arrive: the provider call, MCP
-    // discovery and compaction may all take long enough that no event reaches
-    // the webview for a while.
-    postBusy(true);
-    const abortExternal = () => abortController && abortController.abort();
-    if (externalSignal) {
-      if (externalSignal.aborted) abortExternal();
-      else externalSignal.addEventListener("abort", abortExternal, { once: true });
-    }
-
-    // Auto-compaction: fold older turns into a rolling summary when the
-    // estimated request size passes the configured threshold. Non-destructive:
-    // the summary covers the leading `summaryCoversUpTo` messages and the
-    // transcript itself is never trimmed, so only the un-summarized tail is
-    // considered here — already-summarized turns are never folded twice.
-    const compaction = Settings.getCompaction();
-    // The loop guard derives its per-request budget from the same threshold:
-    // threshold minus a proportional output/reasoning reserve (OpenCode's
-    // formula), so a request is never sent when it would overflow.
-    const budget = computeBudget(compaction.threshold);
-    if (compaction.mode !== "off") {
-      const plan = planCompaction({
-        systemPrompt,
-        messages: conversation.slice(summaryCoversUpTo),
-        threshold: compaction.threshold,
-        keepTurns: compaction.keepTurns,
-        summary,
-      });
-      if (plan.shouldCompact) {
-        log.appendLine(
-          "Compaction: estimate " + plan.estimate + " > threshold " + compaction.threshold +
-          ", folding " + plan.old.length + " messages"
-        );
-        let proceed = true;
-        if (compaction.mode === "ask" && !agentRun) {
-          const choice = await vscode.window.showWarningMessage(
-            "Conversation is ~" + formatTokenCount(plan.estimate) +
-            " tokens — over your " + formatTokenCount(compaction.threshold) +
-            " compaction threshold. Compact older messages into a summary?",
-            { modal: false },
-            "Compact",
-            "Send anyway"
-          );
-          proceed = choice === "Compact";
-        } else if (compaction.mode === "ask") {
-          // An agent tab is unattended: asking would hang the run (and the
-          // parent's `agent` tool) on a notification nobody is watching. Compact
-          // like "auto" — the tab's own Stop still cancels the run.
-          log.appendLine("Compaction: agent run, compacting without asking");
+      // Inject AGENTS.md content if enabled
+      if (Settings.getUseAgentsMd()) {
+        try {
+          const workspaceFolders = vscode.workspace.workspaceFolders;
+          if (workspaceFolders && workspaceFolders.length > 0) {
+            const agentsPath = path.join(workspaceFolders[0].uri.fsPath, Settings.getAgentsMdPath());
+            if (fs.existsSync(agentsPath)) {
+              const agentsContent = fs.readFileSync(agentsPath, "utf-8");
+              systemPrompt = "<!-- AGENTS.md / Project Instructions -->\n" + agentsContent + "\n\n" + systemPrompt;
+            }
+          }
+        } catch (e) {
+          log.appendLine("Failed to read AGENTS.md: " + (e instanceof Error ? e.message : String(e)));
         }
-        if (proceed) {
-          await compact(plan, modelConfig, apiKey, provider);
-          // The user may have hit Stop during the compaction call. Leave the
-          // chat settled: a leftover aborted controller would keep `isBusy`
-          // true (and the webview on Stop) until the next send.
-          if (abortController && abortController.signal.aborted) {
-            abortController = null;
-            if (externalSignal) externalSignal.removeEventListener("abort", abortExternal);
-            post({ type: "responseComplete", messageId });
-            postBusy(false);
-            return { ok: false, aborted: true, error: null, text: "" };
+      }
+
+      // Inject context flags
+      const contextFlags = Settings.getContextFlags();
+      const contextParts = [];
+      const now = new Date();
+      if (contextFlags.includeDate !== false) {
+        contextParts.push("Current date: " + now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }));
+      }
+      if (contextFlags.includeOS !== false) {
+        contextParts.push("Platform/OS: " + process.platform);
+        // Shell used by the run_command tool (child_process.exec), not the user's terminal
+        contextParts.push(describeShellBrief());
+      }
+      if (contextFlags.includeRegion !== false) {
+        contextParts.push("Locale: " + (Intl.DateTimeFormat().resolvedOptions().locale || "unknown") + ", Timezone: " + (Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown"));
+      }
+      if (contextParts.length > 0) {
+        systemPrompt = "<!-- Context -->\n" + contextParts.join("\n") + "\n\n" + systemPrompt;
+      }
+
+      // Tools may require user approval before executing
+      if (tools.length > 0) {
+        systemPrompt +=
+          "\n\nImportant: Some tool calls require user approval. If a tool call is denied or returns an approval error, " +
+          "do not retry the same tool call. Adapt your answer based on the information you already have.";
+      }
+
+      // Auto-compaction: fold older turns into a rolling summary when the
+      // estimated request size passes the configured threshold. Non-destructive:
+      // the summary covers the leading `summaryCoversUpTo` messages and the
+      // transcript itself is never trimmed, so only the un-summarized tail is
+      // considered here — already-summarized turns are never folded twice.
+      const compaction = Settings.getCompaction();
+      // The loop guard derives its per-request budget from the same threshold:
+      // threshold minus a proportional output/reasoning reserve (OpenCode's
+      // formula), so a request is never sent when it would overflow.
+      const budget = computeBudget(compaction.threshold);
+      if (compaction.mode !== "off") {
+        const plan = planCompaction({
+          systemPrompt,
+          messages: conversation.slice(summaryCoversUpTo),
+          threshold: compaction.threshold,
+          keepTurns: compaction.keepTurns,
+          summary,
+        });
+        if (plan.shouldCompact) {
+          log.appendLine(
+            "Compaction: estimate " + plan.estimate + " > threshold " + compaction.threshold +
+            ", folding " + plan.old.length + " messages"
+          );
+          let proceed = true;
+          if (compaction.mode === "ask" && !agentRun) {
+            const choice = await vscode.window.showWarningMessage(
+              "Conversation is ~" + formatTokenCount(plan.estimate) +
+              " tokens — over your " + formatTokenCount(compaction.threshold) +
+              " compaction threshold. Compact older messages into a summary?",
+              { modal: false },
+              "Compact",
+              "Send anyway"
+            );
+            signal.throwIfAborted();
+            proceed = choice === "Compact";
+          } else if (compaction.mode === "ask") {
+            // An agent tab is unattended: asking would hang the run (and the
+            // parent's `agent` tool) on a notification nobody is watching. Compact
+            // like "auto" — the tab's own Stop still cancels the run.
+            log.appendLine("Compaction: agent run, compacting without asking");
+          }
+          if (proceed) {
+            signal.throwIfAborted();
+            await compact(plan, modelConfig, apiKey, provider);
+            signal.throwIfAborted();
           }
         }
       }
-    }
 
-    const messages = convertToChatMessages(systemPrompt);
-    log.appendLine("Chat " + chatId + ": sending " + tools.length + " total tools to model");
+      const messages = convertToChatMessages(systemPrompt);
+      log.appendLine("Chat " + chatId + ": sending " + tools.length + " total tools to model");
 
-    try {
       await chatLoop(messageId, messages, modelConfig, apiKey, provider, tools, budget);
+      signal.throwIfAborted();
       if (turnStopReason === "budget") {
         // A graceful guard stop is not a failure: the chat has a partial answer
         // and told the user why. The run that owns this turn is told the same.
@@ -794,7 +799,7 @@ function createChatController(options) {
       }
       return { ok: true, aborted: false, error: null, text: turnStreamText };
     } catch (err) {
-      if (isAbortError(err)) {
+      if (signal.aborted || isAbortError(err)) {
         post({ type: "responseComplete", messageId });
         return { ok: false, aborted: true, error: null, text: turnStreamText };
       }
@@ -835,6 +840,7 @@ function createChatController(options) {
     post({ type: "toolStatus", text: "Compacting conversation\u2026" });
 
     try {
+      controller.signal.throwIfAborted();
       const result = await provider.chat(
         /** @type {Array<import("../providers/openai").ChatMessage>} */ (plan.compactRequest),
         modelConfig.modelId,
@@ -847,6 +853,7 @@ function createChatController(options) {
         "off", // no generated reasoning; explicit per-model parameters still apply
         modelConfig.requestParameters
       );
+      controller.signal.throwIfAborted();
       if (!result.text || !result.text.trim()) {
         log.appendLine("Compaction: model returned an empty summary");
         return;
@@ -898,12 +905,8 @@ function createChatController(options) {
    */
   async function chatLoop(messageId, messages, modelConfig, apiKey, provider, tools, budget) {
     const signal = abortController ? abortController.signal : undefined;
-    if (signal && signal.aborted) {
-      // Stop button was hit between rounds — unwind cleanly instead of
-      // calling the provider with a dead signal.
-      post({ type: "responseComplete", messageId });
-      return;
-    }
+    // Cancellation must unwind to an aborted TurnOutcome, never a normal return.
+    signal?.throwIfAborted();
     // Loop guard: before EVERY model call (first send and each re-send),
     // estimate the request and prune old tool rounds to fit the budget. If
     // even that cannot fit, stop gracefully — a doomed request is never sent.
@@ -947,6 +950,7 @@ function createChatController(options) {
         requestTools = tools.map((tool) => tool.function.name === "agent" ? currentAgentTool : tool);
       }
     }
+    signal?.throwIfAborted();
     const result = await provider.chat(
       messages, modelConfig.modelId, modelConfig.endpoint, apiKey,
       (chunk) => {
@@ -960,9 +964,11 @@ function createChatController(options) {
       modelConfig.requestParameters
     );
 
+    signal?.throwIfAborted();
     if (result.toolCalls && result.toolCalls.length > 0) {
       messages.push({ role: "assistant", content: null, tool_calls: result.toolCalls });
       for (const tc of result.toolCalls) {
+        signal?.throwIfAborted();
         let toolResult, toolArgs;
         try {
           toolArgs = JSON.parse(tc.function.arguments || "{}");
@@ -973,6 +979,7 @@ function createChatController(options) {
 
         // Approval gate — no tool executes without passing the policy check
         const decision = await approvals.request(tc.function.name, toolArgs);
+        signal?.throwIfAborted();
         if (decision.decision !== "allow") {
           toolResult =
             "Error: user denied approval for tool `" + tc.function.name + "`" +
@@ -996,6 +1003,7 @@ function createChatController(options) {
           // conflict in their own approval cards.
           activity.start(chatId, title, tc.function.name, toolArgs);
           try {
+            signal?.throwIfAborted();
             // Route MCP tools to the MCP client
             if (tc.function.name.startsWith("mcp__")) {
               const parts = tc.function.name.split("__");
@@ -1036,11 +1044,14 @@ function createChatController(options) {
                 }
               );
             }
+            // MCP and some built-ins cannot interrupt in-flight work. Even if
+            // they finish normally, cancellation must stop the rest of the batch.
+            signal?.throwIfAborted();
           } catch (e) {
             // Aborts must propagate: the request was cancelled, so stop the
             // loop entirely instead of reporting "Error: Aborted" and recursing
             // with a dead signal (which would zombie on past the cancel).
-            if (isAbortError(e)) {
+            if (signal?.aborted || isAbortError(e)) {
               // Finalize the open tool box so it doesn't sit on "Running …"
               // forever after the user cancels mid-tool.
               post({
@@ -1373,6 +1384,11 @@ function createChatController(options) {
      * @returns {Promise<import("./agent-run").TurnOutcome>}
      */
     runAgentTask: async (options) => {
+      // A rejected run must not change the active turn's mode (or clear it in
+      // finally), otherwise an agent could regain its own sub-agent tool.
+      if (abortController || disposed) {
+        return handleSendMessage("agent-progress", String(options.task), [], undefined, options.signal);
+      }
       agentRun = true;
       try {
         return await handleSendMessage("agent-progress", String(options.task), [], undefined, options.signal);

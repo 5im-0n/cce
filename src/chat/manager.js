@@ -31,7 +31,6 @@ const SIDEBAR_CHAT_ID = "sidebar";
  * @property {ChatController} controller
  * @property {{ setTitle: (title: string) => void, reveal: () => void, panel: vscode.WebviewPanel } | null} panelHost
  * @property {boolean} [agentRunning]
- * @property {number} [pendingAgentCount]
  * @property {string} [parentChatId]
  * @property {(options?: { closeTab?: boolean, reason?: string }) => void} [cancelAgent]
  * @property {() => void} [onAgentTabClosed] - This chat's tab was closed while it
@@ -47,6 +46,9 @@ function createChatManager(context) {
   const chats = new Map();
   const ownership = createOwnership();
   const activity = createActivityRegistry();
+  // Reservations belong to jobs, not tabs: a closed chat may still have work
+  // unwinding, and it must occupy its slot until that work actually settles.
+  let agentJobCount = 0;
 
   /** @type {string | null} */
   let sidebarChatId = null;
@@ -115,12 +117,7 @@ function createChatManager(context) {
 
   /** Count live agent jobs, including reserved slots whose tabs are still being created. */
   function getRunningAgentCount() {
-    let count = 0;
-    for (const chat of chats.values()) {
-      if (chat.agentRunning) count++;
-      count += chat.pendingAgentCount || 0;
-    }
-    return count;
+    return agentJobCount;
   }
 
   /** Notify active parent controllers when global agent capacity changes. */
@@ -180,11 +177,20 @@ function createChatManager(context) {
 
     // Reserve before any async work (MCP discovery/panel setup) to close the
     // race between simultaneous agent tool calls.
-    parentChat.pendingAgentCount = (parentChat.pendingAgentCount || 0) + accepted.length;
-    refreshAgentCapacity();
+    agentJobCount += accepted.length;
 
     /** @type {Array<Promise<import("./agent-run").AgentTaskReport>>} */
-    const jobs = accepted.map((task, index) => spawnVisibleAgent(options, task, index));
+    const jobs = accepted.map(async (task, index) => {
+      try {
+        refreshAgentCapacity();
+        return await spawnVisibleAgent(options, task, index);
+      } finally {
+        // Neither cancellation nor closing a tab settles the job. Keep its
+        // reservation until setup/run/cleanup has actually returned or thrown.
+        agentJobCount--;
+        refreshAgentCapacity();
+      }
+    });
     // Settle independently: one child whose construction throws must not erase
     // the results of its siblings, and a rejection must not skip the ones still
     // running.
@@ -221,13 +227,10 @@ function createChatManager(context) {
    */
   async function spawnVisibleAgent(options, task, index) {
     const parent = chats.get(options.parentChatId);
-    if (parent) parent.pendingAgentCount = Math.max(0, (parent.pendingAgentCount || 0) - 1);
     if (disposed || !parent) {
-      refreshAgentCapacity();
       return { index, outcome: "skipped", reason: "its parent chat closed" };
     }
     if (options.signal && options.signal.aborted) {
-      refreshAgentCapacity();
       return { index, outcome: "skipped", reason: "the parent request was cancelled" };
     }
 
@@ -241,7 +244,6 @@ function createChatManager(context) {
         reasoningEffort: options.reasoningEffort,
       });
     } catch (e) {
-      refreshAgentCapacity();
       const reason = e instanceof Error ? e.message : String(e);
       return { index, outcome: "error", reason: "the agent chat could not be created: " + reason };
     }
@@ -250,18 +252,16 @@ function createChatManager(context) {
     const abortFromParent = () => agentAbortController.abort();
     const entry = chats.get(agentId);
     if (!entry) {
-      refreshAgentCapacity();
+      agentChat.dispose();
       return { index, outcome: "error", reason: "the agent chat could not be created" };
-    }
-    if (options.signal) {
-      if (options.signal.aborted) abortFromParent();
-      else options.signal.addEventListener("abort", abortFromParent, { once: true });
     }
     entry.agentRunning = true;
     entry.parentChatId = options.parentChatId;
 
     /** Why the run ended early, when the user caused it. */
     let stoppedBy = /** @type {string | null} */ (null);
+    let cancellationHandled = false;
+    let tabClosureHandled = false;
 
     /**
      * Abort this run. Reached from three places, each of which must say why:
@@ -270,17 +270,25 @@ function createChatManager(context) {
      * @param {{ closeTab?: boolean, reason?: string }} [cancelOptions]
      */
     const cancelAgent = (cancelOptions = {}) => {
-      if (agentAbortController.signal.aborted) return;
-      stoppedBy = cancelOptions.reason || "the user stopped it";
-      agentAbortController.abort();
-      entry.cancelAgent = undefined;
-      agentChat.abortAll();
-      // Closing the tab is right when the *parent* stopped its agents. When the
-      // user pressed Stop inside this tab they want to read the transcript, so
-      // the tab stays open (and becomes an ordinary chat).
-      if (cancelOptions.closeTab === false) return;
-      const current = chats.get(agentId);
-      if (current && current.panelHost) current.panelHost.panel.dispose();
+      try {
+        // The parent's signal can abort this signal before its owned-agent
+        // callback runs. That does NOT mean approvals/controller cleanup ran.
+        if (!cancellationHandled) {
+          cancellationHandled = true; // guard synchronous abort re-entry
+          stoppedBy = cancelOptions.reason || "the user stopped it";
+          agentAbortController.abort();
+          agentChat.abortAll();
+        }
+      } finally {
+        // A later parent stop may still close a tab kept open by its own Stop.
+        // Track closure separately from cancellation, and keep the callback
+        // registered until the job settles.
+        const current = chats.get(agentId);
+        if (cancelOptions.closeTab !== false && !tabClosureHandled && current && current.panelHost) {
+          tabClosureHandled = true;
+          current.panelHost.panel.dispose();
+        }
+      }
     };
     entry.cancelAgent = cancelAgent;
     // A closed tab means the same thing as Stop. `closeChat` runs *after* the
@@ -290,53 +298,36 @@ function createChatManager(context) {
       if (!entry.agentRunning) return; // auto-close after a finished run
       cancelAgent({ closeTab: false, reason: "the user closed its tab" });
     };
-    // Registering with the parent is what makes the parent's Stop reach this run
-    // (`abortAll` cancels every agent it owns). That is a parent-initiated stop,
-    // not the user pressing this tab's own Stop, so say so in the report.
-    const unregister = typeof parent.controller.registerOwnedAgent === "function"
-      ? parent.controller.registerOwnedAgent({ cancel: () => cancelAgent({ reason: "its parent request was stopped" }) })
-      : () => {};
-
-    /**
-     * Undo the reservation without ever running the task. The tab must not be
-     * created at all: a panel opened for a run that is already cancelled would
-     * look like a live agent and outlive the request that spawned it. The chat
-     * entry is dropped too, so a cancelled run leaves nothing behind.
-     * @param {string} reason
-     * @returns {import("./agent-run").AgentTaskReport}
-     */
-    const skip = (reason) => {
-      entry.agentRunning = false;
-      entry.cancelAgent = undefined;
-      entry.onAgentTabClosed = undefined;
-      unregister();
-      if (options.signal) options.signal.removeEventListener("abort", abortFromParent);
-      // No panel was ever attached, so nothing else will ever close this chat.
-      chats.delete(agentId);
-      try {
-        agentChat.dispose();
-      } catch (e) {
-        log.appendLine("Agent " + (index + 1) + ": dispose after skip failed: " + (e instanceof Error ? e.message : String(e)));
+    let unregister = () => {};
+    let taskStarted = false;
+    try {
+      if (options.signal) {
+        if (options.signal.aborted) abortFromParent();
+        else options.signal.addEventListener("abort", abortFromParent, { once: true });
       }
-      refreshAgentCapacity();
-      parent.controller.onAgentCapacityChanged();
-      return { index, outcome: "skipped", reason };
-    };
+      // Include registration and panel setup in cleanup: either can throw or
+      // synchronously cancel a reserved job before its task ever starts.
+      if (typeof parent.controller.registerOwnedAgent === "function") {
+        unregister = parent.controller.registerOwnedAgent({
+          cancel: () => cancelAgent({ reason: "its parent request was stopped" }),
+        });
+      }
+      if (agentAbortController.signal.aborted) {
+        return { index, outcome: "skipped", reason: "the run was cancelled before its tab opened" };
+      }
 
-    // The parent stopped its agents before this one even had a tab.
-    if (agentAbortController.signal.aborted) return skip("the run was cancelled before its tab opened");
+      try {
+        entry.panelHost = createEditorChatPanel(context, agentChat, closeChat, { preserveFocus: true });
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : String(e);
+        return { index, outcome: "skipped", reason: "its tab could not be opened: " + reason };
+      }
+      setChatTitle(agentId, "Agent " + (index + 1) + ": " + (String(task).slice(0, 48) || "Task"));
+      if (agentAbortController.signal.aborted) {
+        return { index, outcome: "skipped", reason: "the run was cancelled before its task started" };
+      }
 
-    let host;
-    try {
-      host = createEditorChatPanel(context, agentChat, closeChat, { preserveFocus: true });
-    } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
-      return skip("its tab could not be opened: " + reason);
-    }
-    entry.panelHost = host;
-    setChatTitle(agentId, "Agent " + (index + 1) + ": " + (String(task).slice(0, 48) || "Task"));
-
-    try {
+      taskStarted = true;
       const outcome = await agentChat.runAgentTask({
         task: String(task),
         signal: agentAbortController.signal,
@@ -364,8 +355,6 @@ function createChatManager(context) {
         report = { index, outcome: "ok", text: extractFinalAgentResponse(agentChat, outcome.text) };
       }
 
-      refreshAgentCapacity();
-      agentChat.onAgentCapacityChanged();
       // A stopped or failed run keeps its tab: the user may want to read it.
       if (report.outcome === "ok" && Settings.getAutoCloseAgents() && entry.panelHost) {
         entry.panelHost.panel.dispose();
@@ -385,9 +374,23 @@ function createChatManager(context) {
       entry.agentRunning = false;
       entry.cancelAgent = undefined;
       entry.onAgentTabClosed = undefined;
-      if (options.signal) options.signal.removeEventListener("abort", abortFromParent);
-      unregister();
-      refreshAgentCapacity();
+      try {
+        if (options.signal) options.signal.removeEventListener("abort", abortFromParent);
+        unregister();
+      } finally {
+        if (!taskStarted) {
+          // Failed/skipped setup must not leave a controller or reservation
+          // behind, even when no panel was attached to trigger closeChat.
+          if (entry.panelHost) entry.panelHost.panel.dispose();
+          chats.delete(agentId);
+          ownership.releaseAll(agentId);
+          try {
+            agentChat.dispose();
+          } catch (e) {
+            log.appendLine("Agent " + (index + 1) + ": dispose after setup failed: " + (e instanceof Error ? e.message : String(e)));
+          }
+        }
+      }
     }
   }
 

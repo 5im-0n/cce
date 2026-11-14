@@ -1545,6 +1545,12 @@
         // user has scrolled up).
         scrollToBottom();
       } else if (m.type === "error") {
+        // A rejected overlapping send is not a failure of the active turn.
+        // Keep its stream, approvals and Stop button intact.
+        if (m.turnRejected) {
+          addMsg("error", "Error: " + m.error);
+          return;
+        }
         // The response failed: seal open blocks without offering a copy
         // control, so a later completion cannot add one retroactively.
         finalizeResponses(false);

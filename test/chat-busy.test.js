@@ -45,10 +45,24 @@ async function settle(rounds = 8) {
   for (let i = 0; i < rounds; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
+/** Create a controllable promise for holding startup at an exact await. */
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 /**
  * @param {Object} [options]
- * @param {(signal: AbortSignal | undefined) => Promise<{ text: string }>} [options.chat]
+ * @param {import("../src/providers/registry").Provider["chat"]} [options.chat]
  * @param {boolean} [options.isAgent]
+ * @param {() => Promise<string>} [options.getApiKey]
+ * @param {() => Promise<Array<any>>} [options.fetchMcpTools]
+ * @param {() => string} [options.getSystemPrompt]
+ * @param {() => { mode: string, threshold: number, keepTurns: number }} [options.getCompaction]
+ * @param {(options: any) => any} [options.planCompaction]
+ * @param {(...args: any[]) => Promise<string | undefined>} [options.showWarningMessage]
+ * @param {() => Promise<void>} [options.beforeSave]
  */
 function setup(options = {}) {
   const sessions = [];
@@ -56,23 +70,28 @@ function setup(options = {}) {
   let selfStops = 0;
 
   stubs = {
-    vscode: { workspace: { workspaceFolders: undefined }, env: { clipboard: { writeText: async () => {} } } },
+    vscode: {
+      workspace: { workspaceFolders: undefined },
+      env: { clipboard: { writeText: async () => {} } },
+      window: { showWarningMessage: options.showWarningMessage || (async () => "Send anyway") },
+    },
     [file("src/config/Settings.js")]: {
       getModels: () => [MODEL],
       getDefaultModel: () => MODEL.id,
       getReasoningEffort: () => "medium",
       setDefaultModel: () => {},
       setReasoningEffort: () => {},
-      getApiKey: async () => "key",
-      getSystemPrompt: () => "",
+      getApiKey: options.getApiKey || (async () => "key"),
+      getSystemPrompt: options.getSystemPrompt || (() => ""),
       getUseAgentsMd: () => false,
       getContextFlags: () => ({ includeDate: false, includeOS: false, includeRegion: false }),
       getToolSettings: () => ({}),
-      getCompaction: () => ({ mode: "off", threshold: 300000, keepTurns: 10 }),
+      getCompaction: options.getCompaction || (() => ({ mode: "off", threshold: 300000, keepTurns: 10 })),
       getSessions: () => sessions,
       getCurrentSessionId: () => "",
       setCurrentSessionId: () => {},
       mutateSessions: async (fn) => {
+        if (options.beforeSave) await options.beforeSave();
         fn(sessions);
         return sessions;
       },
@@ -85,8 +104,13 @@ function setup(options = {}) {
     [file("src/tools/definitions.js")]: { getEnabledDefinitions: () => [] },
     [file("src/tools/executor.js")]: { executeToolCall: async () => "" },
     [file("src/tools/shellInfo.js")]: { describeShellBrief: () => "" },
-    [file("src/mcp/client.js")]: { fetchMcpTools: async () => [], callMcpTool: async () => "" },
-    [file("src/context/compact.js")]: { planCompaction: () => ({ shouldCompact: false }) },
+    [file("src/mcp/client.js")]: {
+      fetchMcpTools: options.fetchMcpTools || (async () => []),
+      callMcpTool: async () => "",
+    },
+    [file("src/context/compact.js")]: {
+      planCompaction: options.planCompaction || (() => ({ shouldCompact: false })),
+    },
     [file("src/context/estimate.js")]: {
       formatTokenCount: (n) => String(n),
       estimateTextTokens: () => 0,
@@ -98,7 +122,6 @@ function setup(options = {}) {
       truncateToolResult: (text) => text,
       countToolCalls: () => ({}),
     },
-    [file("src/conversation/edit.js")]: { applyEdit: () => ({ ok: false }), lastUserMessageIndex: () => -1 },
     [file("src/chat/approvals.js")]: {
       createApprovalGate: () => ({
         request: async () => ({ decision: "allow", mode: "auto" }),
@@ -197,6 +220,271 @@ test("a webview attached mid-request is told the chat is still busy", async () =
   assert.equal(controller.isBusy(), false);
   assert.deepEqual(busySequence(afterRequestState), [true, true, false]);
   assert.equal(posted.filter((m) => m.type === "busyChanged" && m.busy).length, 1, "busy is posted once per run");
+});
+
+// Exercise both entry points while startup is suspended, not just while the
+// provider is already running. Rejected sends must never own the turn's finally.
+for (const stage of ["getApiKey", "fetchMcpTools"]) {
+  for (const startedBy of ["ordinary", "agent"]) {
+    for (const finish of ["Stop", "complete"]) {
+      test(`${startedBy} send held at ${stage}: overlapping sends cannot steal the turn (${finish})`, async (t) => {
+        const startup = deferred();
+        const startupCalls = [];
+        const providerCalls = [];
+        const startupValue = stage === "getApiKey" ? "key" : [];
+        const { controller, posted } = setup({
+          isAgent: startedBy === "agent",
+          getApiKey: async () => {
+            startupCalls.push("getApiKey");
+            return stage === "getApiKey" ? startup.promise : "key";
+          },
+          fetchMcpTools: async () => {
+            startupCalls.push("fetchMcpTools");
+            return stage === "fetchMcpTools" ? startup.promise : [];
+          },
+          chat: async (messages, modelId, endpoint, apiKey, onChunk, signal) => {
+            providerCalls.push({ messages, signal });
+            return { text: "done" };
+          },
+        });
+        const before = posted.length;
+        const firstId = startedBy === "agent" ? "agent-progress" : "m1";
+        const firstTurn = startedBy === "agent"
+          ? controller.runAgentTask({ task: "first request" })
+          : controller.handleMessage({ type: "sendMessage", messageId: firstId, text: "first request" });
+        t.after(async () => {
+          controller.abortAll();
+          startup.resolve(startupValue);
+          await firstTurn;
+          await settle();
+          controller.dispose();
+        });
+
+        // No microtask or discovery result is needed to make Stop reachable.
+        assert.equal(controller.isBusy(), true);
+        assert.deepEqual(busySequence(posted, before), [true]);
+        await settle();
+        const expectedStartup = stage === "getApiKey" ? ["getApiKey"] : ["getApiKey", "fetchMcpTools"];
+        assert.deepEqual(startupCalls, expectedStartup, "the selected startup await is still pending");
+        assert.equal(providerCalls.length, 0);
+
+        controller.handleMessage({ type: "sendMessage", messageId: "m2", text: "overlapping user request" });
+        const rejectedSignal = new AbortController();
+        const rejected = await controller.runAgentTask({
+          task: "overlapping agent request",
+          signal: rejectedSignal.signal,
+        });
+        assert.equal(rejected.ok, false);
+        assert.equal(rejected.aborted, false);
+        assert.equal(rejected.text, "");
+        assert.match(rejected.error, /Wait for the current response/);
+        const userError = posted.find((m) => m.type === "error" && m.messageId === "m2");
+        assert.ok(userError, "the ordinary overlap is explicitly rejected too");
+        assert.match(userError.error, /Wait for the current response/);
+        assert.equal(userError.turnRejected, true, "the UI must preserve the active turn");
+
+        // The rejected agent's signal must not become the active cancellation
+        // source. In the complete case the original turn must still succeed.
+        rejectedSignal.abort();
+        await settle();
+        assert.equal(controller.isBusy(), true);
+        assert.deepEqual(startupCalls, expectedStartup, "overlaps never enter startup");
+        assert.deepEqual(busySequence(posted, before), [true], "rejection never posts idle");
+
+        if (finish === "Stop") {
+          controller.handleMessage({ type: "cancelMessage" });
+          controller.handleMessage({ type: "sendMessage", messageId: "m3", text: "send while unwinding" });
+          const lateError = posted.find((m) => m.type === "error" && m.messageId === "m3");
+          assert.ok(lateError, "Stop retains ownership until startup unwinds");
+          assert.match(lateError.error, /Wait for the current response/);
+          assert.equal(controller.isBusy(), true);
+          assert.deepEqual(busySequence(posted, before), [true]);
+        }
+
+        startup.resolve(startupValue);
+        const outcome = await firstTurn;
+        await settle();
+        assert.equal(controller.isBusy(), false);
+        assert.deepEqual(busySequence(posted, before), [true, false], "only the original turn releases busy");
+        if (startedBy === "agent") {
+          assert.equal(outcome.ok, finish === "complete");
+          assert.equal(outcome.aborted, finish === "Stop");
+          assert.equal(outcome.error, null);
+        }
+        assert.equal(providerCalls.length, finish === "Stop" ? 0 : 1, "Stop prevents the provider from starting");
+        if (finish === "complete") {
+          assert.ok(providerCalls[0].signal);
+          assert.equal(providerCalls[0].signal.aborted, false, "a rejected agent cannot cancel the accepted request");
+          assert.deepEqual(providerCalls[0].messages.filter((m) => m.role === "user"), [
+            { role: "user", content: "first request" },
+          ]);
+        }
+        assert.ok(posted.some((m) => m.type === "responseComplete" && m.messageId === firstId));
+        assert.deepEqual(
+          posted.filter((m) => m.type === "error").map((m) => m.messageId),
+          finish === "Stop" ? ["m2", "agent-progress", "m3"] : ["m2", "agent-progress"],
+          "the accepted request is not reported as an error"
+        );
+
+        // Read the host's transcript only after checking busy transitions:
+        // requestState deliberately posts another busyChanged replay.
+        controller.handleMessage({ type: "requestState" });
+        const history = posted.filter((m) => m.type === "historyRestored").at(-1).messages;
+        assert.deepEqual(
+          history.filter((m) => m.role === "user").map((m) => ({ id: m.id, content: m.content })),
+          finish === "Stop" && stage === "getApiKey" ? [] : [{ id: firstId, content: "first request" }],
+          "neither overlapping send appends a user message"
+        );
+      });
+    }
+  }
+}
+
+for (const stage of ["getApiKey", "fetchMcpTools"]) {
+  test(`external cancellation during ${stage} stops an agent before the provider`, async (t) => {
+    const startup = deferred();
+    const external = new AbortController();
+    let providerCalls = 0;
+    let startupCalls = 0;
+    const value = stage === "getApiKey" ? "key" : [];
+    const { controller, posted } = setup({
+      [stage]: () => {
+        startupCalls++;
+        return startup.promise;
+      },
+      chat: async () => {
+        providerCalls++;
+        return { text: "unexpected" };
+      },
+    });
+    const before = posted.length;
+    const turn = controller.runAgentTask({ task: "cancel at startup", signal: external.signal });
+    t.after(async () => {
+      controller.abortAll();
+      startup.resolve(value);
+      await turn;
+      controller.dispose();
+    });
+
+    assert.equal(controller.isBusy(), true);
+    assert.deepEqual(busySequence(posted, before), [true]);
+    await settle();
+    assert.equal(startupCalls, 1);
+    external.abort();
+    assert.equal(controller.isBusy(), true, "the cancelled startup still owns its turn");
+    assert.deepEqual(busySequence(posted, before), [true]);
+    startup.resolve(value);
+
+    assert.deepEqual(await turn, { ok: false, aborted: true, error: null, text: "" });
+    assert.equal(providerCalls, 0);
+    assert.equal(controller.isBusy(), false);
+    assert.deepEqual(busySequence(posted, before), [true, false]);
+  });
+}
+
+for (const failure of [
+  { name: "API key rejection", hook: "getApiKey", async: true, recover: () => Promise.resolve("key") },
+  { name: "system prompt throw", hook: "getSystemPrompt", recover: () => "" },
+  {
+    name: "compaction settings throw",
+    hook: "getCompaction",
+    recover: () => ({ mode: "off", threshold: 300000, keepTurns: 10 }),
+  },
+  {
+    name: "compaction planning throw",
+    hook: "planCompaction",
+    options: { getCompaction: () => ({ mode: "auto", threshold: 300000, keepTurns: 10 }) },
+    recover: () => ({ shouldCompact: false }),
+  },
+  {
+    name: "compaction prompt rejection",
+    hook: "showWarningMessage",
+    async: true,
+    options: {
+      getCompaction: () => ({ mode: "ask", threshold: 300000, keepTurns: 10 }),
+      planCompaction: () => ({
+        shouldCompact: true,
+        estimate: 300001,
+        old: [{ role: "user", content: "older turn" }],
+        keep: [],
+        compactRequest: [],
+      }),
+    },
+    recover: () => Promise.resolve("Send anyway"),
+  },
+]) {
+  test(`${failure.name} releases busy and allows the next send`, async (t) => {
+    const error = new Error(failure.name);
+    let attempts = 0;
+    let providerCalls = 0;
+    const { controller, posted } = setup({
+      ...failure.options,
+      [failure.hook]: () => {
+        attempts++;
+        if (attempts > 1) return failure.recover();
+        if (failure.async) return Promise.reject(error);
+        throw error;
+      },
+      chat: async () => {
+        providerCalls++;
+        return { text: "recovered" };
+      },
+    });
+    t.after(() => controller.dispose());
+    const before = posted.length;
+
+    // Use the webview path so ask-mode compaction actually shows its prompt;
+    // agents intentionally skip that prompt. Any escaped rejection fails test.
+    controller.handleMessage({ type: "sendMessage", messageId: "failed", text: "first attempt" });
+    assert.equal(controller.isBusy(), true);
+    assert.deepEqual(busySequence(posted, before), [true]);
+    await settle();
+    assert.equal(attempts, 1, "the intended failure path was reached");
+    assert.equal(providerCalls, 0, "startup failed before the provider");
+    assert.equal(controller.isBusy(), false);
+    assert.deepEqual(busySequence(posted, before), [true, false]);
+    assert.deepEqual(posted.filter((m) => m.type === "error"), [
+      { type: "error", messageId: "failed", error: failure.name },
+    ]);
+
+    controller.handleMessage({ type: "sendMessage", messageId: "retry", text: "try again" });
+    assert.equal(controller.isBusy(), true);
+    assert.deepEqual(busySequence(posted, before), [true, false, true]);
+    await settle();
+    assert.equal(attempts, 2);
+    assert.equal(providerCalls, 1, "the next send is accepted after startup fails");
+    assert.equal(controller.getLastAssistantResponse(), "recovered");
+    assert.equal(controller.isBusy(), false);
+    assert.deepEqual(busySequence(posted, before), [true, false, true, false]);
+    assert.ok(posted.some((m) => m.type === "responseComplete" && m.messageId === "retry"));
+    assert.equal(posted.filter((m) => m.type === "error").length, 1);
+  });
+}
+
+test("Stop during edit persistence still replays the committed history", async (t) => {
+  const saving = deferred();
+  let holdSave = false;
+  let calls = 0;
+  const { controller, posted } = setup({
+    beforeSave: async () => { if (holdSave) await saving.promise; },
+    chat: async () => { calls++; return { text: "original answer" }; },
+  });
+  t.after(() => { saving.resolve(); controller.dispose(); });
+  controller.handleMessage({ type: "sendMessage", messageId: "m1", text: "original prompt" });
+  await settle();
+  holdSave = true;
+  const before = posted.length;
+  controller.handleMessage({ type: "sendMessage", messageId: "edited", editingId: "m1", text: "edited prompt" });
+  await settle();
+  assert.equal(controller.isBusy(), true);
+  controller.handleMessage({ type: "cancelMessage" });
+  saving.resolve();
+  await settle();
+  const history = posted.slice(before).find((m) => m.type === "historyRestored");
+  assert.ok(history, "the cancelled regeneration still displays the committed edit");
+  assert.deepEqual(history.messages, [{ role: "user", id: "m1", content: "edited prompt", images: [] }]);
+  assert.equal(calls, 1, "Stop prevents regeneration");
+  assert.equal(controller.isBusy(), false);
 });
 
 test("an agent tab forwards its own Stop to the host that started the run", () => {

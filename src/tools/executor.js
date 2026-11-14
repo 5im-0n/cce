@@ -8,13 +8,15 @@ const cp = require("child_process");
  * @param {string} toolName
  * @param {Record<string, any>} args
  * @param {AbortSignal} [signal] - cancellation signal from the chat request;
- *   forwarded to tools that support it (search_code, run_command)
+ *   checked before dispatch and forwarded to tools that support in-flight
+ *   cancellation (search_code, run_command)
  * @param {(scanned: number, total: number) => void} [onProgress] - live
  *   progress callback for long-running tools (search_code); the caller posts
  *   it to the webview as toolStatus
  * @returns {Promise<string>}
  */
 async function executeToolCall(toolName, args, signal, onProgress) {
+  signal?.throwIfAborted();
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
 
   switch (toolName) {

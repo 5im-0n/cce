@@ -53,6 +53,10 @@ async function settle(rounds = 10) {
  * @param {string} [options.toolResult] - Result returned by built-in and MCP tool stubs.
  * @param {boolean} [options.overBudget] - The loop guard reports over budget.
  * @param {"ask"|"auto"|"off"} [options.compactionMode]
+ * @param {() => Promise<string>} [options.callMcpTool]
+ * @param {(name: string) => Promise<string>} [options.executeToolCall]
+ * @param {boolean} [options.realApprovals] - Exercise the real pending approval gate.
+ * @param {() => Promise<string>} [options.showWarningMessage]
  */
 function setup(options = {}) {
   const sessions = [];
@@ -65,7 +69,10 @@ function setup(options = {}) {
     vscode: {
       workspace: { workspaceFolders: undefined },
       env: { clipboard: { writeText: async () => {} } },
-      window: { showWarningMessage: async (...args) => { warnings.push(args[0]); return "Compact"; } },
+      window: { showWarningMessage: async (...args) => {
+        warnings.push(args[0]);
+        return options.showWarningMessage ? options.showWarningMessage() : "Compact";
+      } },
     },
     [file("src/config/Settings.js")]: {
       getModels: () => [MODEL],
@@ -98,9 +105,9 @@ function setup(options = {}) {
         return [];
       },
     },
-    [file("src/tools/executor.js")]: { executeToolCall: async () => options.toolResult || "" },
+    [file("src/tools/executor.js")]: { executeToolCall: options.executeToolCall || (async () => options.toolResult || "") },
     [file("src/tools/shellInfo.js")]: { describeShellBrief: () => "" },
-    [file("src/mcp/client.js")]: { fetchMcpTools: async () => [], callMcpTool: async () => options.toolResult || "" },
+    [file("src/mcp/client.js")]: { fetchMcpTools: async () => [], callMcpTool: options.callMcpTool || (async () => options.toolResult || "") },
     [file("src/context/compact.js")]: {
       planCompaction: () => ({
         shouldCompact: Boolean(options.compactionMode && options.compactionMode !== "off"),
@@ -137,6 +144,10 @@ function setup(options = {}) {
     },
   };
 
+  if (options.realApprovals) {
+    delete stubs[file("src/chat/approvals.js")];
+    delete require.cache[file("src/chat/approvals.js")];
+  }
   const controllerPath = file("src/chat/controller.js");
   delete require.cache[controllerPath];
   const { createChatController } = require(controllerPath);
@@ -221,6 +232,162 @@ test("a cancelled run reports the partial work it produced", async () => {
   assert.equal(outcome.text, "partial findings", "the parent can report what was found");
 });
 
+/** A manually settled dependency, modelling an MCP call that ignores Stop. */
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+/** @param {string} name */
+function toolCall(name) {
+  return { id: name, function: { name, arguments: "{}" } };
+}
+
+for (const stop of ["Stop", "close", "external"]) {
+  for (const completion of ["resolve", "reject"]) {
+    test(`${stop} during MCP (${completion}) prevents later writes and model rounds`, async (t) => {
+      const mcp = deferred();
+      const external = new AbortController();
+      const executed = [];
+      let calls = 0;
+      let mcpCalls = 0;
+      const { controller, posted } = setup({
+        chat: async (...args) => {
+          calls++;
+          args[4]("partial findings");
+          return { text: "", toolCalls: [toolCall("mcp__server__slow"), toolCall("write_file")] };
+        },
+        callMcpTool: () => { mcpCalls++; return mcp.promise; },
+        executeToolCall: async (name) => { executed.push(name); return "written"; },
+      });
+      t.after(() => { mcp.resolve("late result"); controller.dispose(); });
+      const run = controller.runAgentTask({ task: "work", signal: external.signal });
+      await settle();
+      assert.equal(mcpCalls, 1);
+      if (stop === "Stop") controller.handleMessage({ type: "cancelMessage" });
+      else if (stop === "close") controller.dispose();
+      else external.abort();
+      assert.equal(controller.isBusy(), true, "uncancellable work is still unwinding");
+      if (completion === "resolve") mcp.resolve("late result");
+      else mcp.reject(new Error("remote call failed after cancellation"));
+      const outcome = await run;
+      assert.deepEqual(outcome, { ok: false, aborted: true, error: null, text: "partial findings" });
+      assert.deepEqual(executed, [], "no new built-in dispatch after Stop");
+      assert.equal(calls, 1, "no extra model request");
+      assert.equal(controller.isBusy(), false);
+      assert.equal(posted.filter((m) => m.type === "toolStart").length, 1);
+      if (stop !== "close") {
+        assert.ok(posted.some((m) => m.type === "toolCall" && m.result === "Aborted by user"));
+      }
+    });
+  }
+}
+
+for (const approveFirst of [false, true]) {
+  test(`external cancellation releases real approval waits (already approved: ${approveFirst})`, async (t) => {
+    const external = new AbortController();
+    const executed = [];
+    let calls = 0;
+    const { controller, posted } = setup({
+      realApprovals: true,
+      chat: async () => {
+        calls++;
+        return { text: "", toolCalls: [toolCall("write_file"), toolCall("delete_files")] };
+      },
+      executeToolCall: async (name) => { executed.push(name); return "written"; },
+    });
+    t.after(() => controller.dispose());
+    const run = controller.runAgentTask({ task: "work", signal: external.signal });
+    await settle();
+    const card = posted.find((m) => m.type === "approvalRequest");
+    assert.ok(card, "a real approval is pending");
+    if (approveFirst) {
+      // Resolve approval and cancel before its awaiting continuation dispatches.
+      controller.handleMessage({ type: "approvalResponse", approvalId: card.approvalId, decision: "allow" });
+    }
+    external.abort();
+    await settle();
+    assert.equal(controller.isBusy(), false, "external abort must settle the pending approval");
+    const outcome = await run;
+    assert.equal(outcome.aborted, true);
+    assert.equal(outcome.ok, false);
+    assert.deepEqual(executed, []);
+    assert.equal(calls, 1);
+    assert.equal(posted.filter((m) => m.type === "approvalRequest").length, 1);
+  });
+}
+
+test("an already cancelled external signal returns aborted without starting work", async () => {
+  let calls = 0;
+  const { controller } = setup({ chat: async () => { calls++; return { text: "done" }; } });
+  const external = new AbortController();
+  external.abort();
+  const outcome = await controller.runAgentTask({ task: "work", signal: external.signal });
+  assert.deepEqual(outcome, { ok: false, aborted: true, error: null, text: "" });
+  assert.equal(calls, 0);
+  assert.equal(controller.isBusy(), false);
+});
+
+test("a provider that resolves normally after cancellation cannot start tools or report success", async (t) => {
+  const pending = deferred();
+  const executed = [];
+  const { controller } = setup({
+    chat: () => pending.promise,
+    executeToolCall: async (name) => { executed.push(name); return "written"; },
+  });
+  t.after(() => { pending.resolve({ text: "" }); controller.dispose(); });
+  const run = controller.runAgentTask({ task: "work" });
+  await settle();
+  controller.handleMessage({ type: "cancelMessage" });
+  pending.resolve({ text: "", toolCalls: [toolCall("write_file")] });
+  assert.equal((await run).aborted, true);
+  assert.deepEqual(executed, []);
+});
+
+for (const choice of ["Compact", "Send anyway"]) {
+  test(`Stop during compaction prompt blocks ${choice} from starting another request`, async (t) => {
+    const prompt = deferred();
+    let calls = 0;
+    const { controller, posted, warnings } = setup({
+      compactionMode: "ask",
+      showWarningMessage: () => prompt.promise,
+      chat: async () => { calls++; return { text: "done" }; },
+    });
+    t.after(() => { prompt.resolve(choice); controller.dispose(); });
+    controller.handleMessage({ type: "sendMessage", messageId: "m1", text: "work" });
+    await settle();
+    assert.equal(warnings.length, 1);
+    controller.handleMessage({ type: "cancelMessage" });
+    prompt.resolve(choice);
+    await settle();
+    assert.equal(calls, 0);
+    assert.equal(controller.isBusy(), false);
+    assert.ok(posted.some((m) => m.type === "responseComplete"));
+    assert.equal(posted.some((m) => m.type === "error"), false);
+  });
+}
+
+test("Stop during compaction returns an aborted outcome even if the provider ignores it", async (t) => {
+  const compacting = deferred();
+  let calls = 0;
+  const { controller } = setup({
+    compactionMode: "auto",
+    chat: () => { calls++; return compacting.promise; },
+  });
+  t.after(() => { compacting.resolve({ text: "late summary" }); controller.dispose(); });
+  const run = controller.runAgentTask({ task: "work" });
+  await settle();
+  controller.handleMessage({ type: "cancelMessage" });
+  compacting.resolve({ text: "late summary" });
+  const outcome = await run;
+  assert.equal(outcome.aborted, true);
+  assert.equal(outcome.ok, false);
+  assert.equal(calls, 1);
+  assert.equal(controller.isBusy(), false);
+});
+
 test("a context-budget stop is reported as a stop, not a failure", async () => {
   const { controller } = setup({ overBudget: true });
 
@@ -244,6 +411,22 @@ test("agent mode ends with the run: an adopted tab gets the agent tool back", as
   await settle();
 
   assert.equal(toolSettingsSeen[toolSettingsSeen.length - 1].agent, true, "an ordinary chat can spawn agents");
+});
+
+test("a rejected overlapping agent run cannot clear the active agent mode", async (t) => {
+  const pending = deferred();
+  const { controller, toolSettingsSeen } = setup({ callMcpTool: () => pending.promise,
+    chat: async () => ({ text: "", toolCalls: [toolCall("mcp__server__slow")] }),
+  });
+  t.after(() => { pending.resolve("done"); controller.dispose(); });
+  const run = controller.runAgentTask({ task: "first" });
+  const rejected = await controller.runAgentTask({ task: "overlap" });
+  await settle();
+  assert.equal(rejected.ok, false);
+  assert.equal(toolSettingsSeen[0].agent, false, "the first run must remain an agent");
+  controller.handleMessage({ type: "cancelMessage" });
+  pending.resolve("done");
+  assert.equal((await run).aborted, true);
 });
 
 test("an agent run compacts without asking, so it cannot hang on a prompt", async () => {
