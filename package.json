@@ -61,6 +61,13 @@
           "when": "view == 'cce.chatView'",
           "group": "navigation@1"
         }
+      ],
+      "editor/title": [
+        {
+          "command": "cce.newChatTab",
+          "when": "activeWebviewPanelId == 'cceChat'",
+          "group": "navigation"
+        }
       ]
     }
   },
