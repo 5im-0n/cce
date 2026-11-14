@@ -32,7 +32,7 @@ const SIDEBAR_CHAT_ID = "sidebar";
  * @property {boolean} [agentRunning]
  * @property {number} [pendingAgentCount]
  * @property {string} [parentChatId]
- * @property {() => void} [cancelAgent]
+ * @property {(options?: { closeTab?: boolean }) => void} [cancelAgent]
  */
 
 /**
@@ -201,11 +201,15 @@ function createChatManager(context) {
     entry.agentRunning = true;
     entry.parentChatId = options.parentChatId;
 
-    const cancelAgent = () => {
+    const cancelAgent = (cancelOptions = {}) => {
       if (agentAbortController.signal.aborted) return;
       agentAbortController.abort();
       entry.cancelAgent = undefined;
       agentChat.abortAll();
+      // Closing the tab is right when the *parent* stopped its agents. When the
+      // user pressed Stop inside this tab they want to read the transcript, so
+      // the tab stays open (and becomes an ordinary chat).
+      if (cancelOptions.closeTab === false) return;
       const current = chats.get(agentId);
       if (current && current.panelHost) current.panelHost.panel.dispose();
     };
@@ -234,12 +238,22 @@ function createChatManager(context) {
       entry.cancelAgent = undefined;
       refreshAgentCapacity();
       agentChat.onAgentCapacityChanged();
+      // Stop landed while the run was unwinding: treat it as a user stop so the
+      // tab is not auto-closed and the parent is not told the work finished.
+      if (agentAbortController.signal.aborted) {
+        return "Agent " + (index + 1) + " was stopped by the user. Its work is incomplete — do not retry it, report the partial result instead.";
+      }
       if (Settings.getAutoCloseAgents() && entry.panelHost) entry.panelHost.panel.dispose();
       return "Agent " + (index + 1) + " result:\n" + finalResult;
     } catch (e) {
       entry.agentRunning = false;
       entry.cancelAgent = undefined;
       const message = e instanceof Error ? e.message : String(e);
+      // A user stop is not a failure: tell the parent model clearly that the
+      // work was interrupted and must not be retried as if it had crashed.
+      if (agentAbortController.signal.aborted) {
+        return "Agent " + (index + 1) + " was stopped by the user. Its work is incomplete — do not retry it, report the partial result instead.";
+      }
       return "Agent " + (index + 1) + " error: " + message;
     } finally {
       if (options.signal) options.signal.removeEventListener("abort", abortFromParent);
@@ -300,6 +314,14 @@ function createChatManager(context) {
         activity,
         runAgent: (agentOptions) => runVisibleAgents({ ...agentOptions, parentChatId: chatId }),
         abortOwnedAgents: () => cancelAgentsForParent(chatId),
+        // An agent tab stopping itself must cancel the run the manager owns.
+        // Looked up lazily: this hook is created before `chats.set` below.
+        onSelfStop: options.isAgent === true
+          ? () => {
+              const self = chats.get(chatId);
+              if (self && self.cancelAgent) self.cancelAgent({ closeTab: false });
+            }
+          : undefined,
         getAgentCapacity: () => ({
           maximum: Settings.getMaxSimultaneousAgents(),
           available: Math.max(0, Settings.getMaxSimultaneousAgents() - getRunningAgentCount()),

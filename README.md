@@ -168,6 +168,7 @@ Add Model Context Protocol servers via **Settings → MCP**. Each server needs a
 More than one conversation can run at the same time. The sidebar chat is the default; open additional ones in editor tabs with **CCE: New Chat Tab** (the `+` button in the chat header, the `↗` button next to any session, or the command palette). Drag the tabs wherever you like — one tab on the login flow, another on a report.
 
 - Each chat has **its own conversation, session, model, reasoning effort, Stop button and approval cards** — answering an approval in one tab can never release a tool call in another.
+- **Sub-agent tabs have their own Stop button.** Stopping an agent in its own tab cancels that run only: the tab stays open with the work it did so far (so you can read it), and the parent model is told the work was stopped rather than failed, so it reports the partial result instead of retrying. Stopping the *parent* chat stops every agent it spawned and closes their tabs.
 - A session is shown by **one chat at a time**. Opening a session that another tab already has reveals that tab instead of forking the transcript; the session list marks such sessions.
 - **Closing a tab aborts its in-flight request**, denies pending approvals and saves the transcript. The session can then be reopened anywhere.
 - **Tabs survive a window reload**: each tab remembers the session it was showing and comes back on the same conversation. A tab whose session was deleted returns as a fresh chat rather than disappearing.

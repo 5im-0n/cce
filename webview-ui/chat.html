@@ -918,22 +918,56 @@
       });
     }
 
-    /** Keep the response action stable while only its Markdown content is re-rendered. */
-    function renderAssistant(el) {
+    /** A response can be copied only once it is finished and actually holds text. */
+    function hasCopyableResponse(el) {
+      return typeof el._rt === "string" && el._rt.trim() !== "";
+    }
+
+    /**
+     * Render an assistant message. The Markdown body is re-rendered on every
+     * chunk, but the copy control is created only once, only for a finished
+     * response, and only when it holds text: a half-streamed answer has
+     * nothing worth copying yet, and an empty response has nothing at all.
+     * @param {HTMLElement} el - assistant message element holding `_rt`
+     * @param {boolean} [complete] - true only for the final render of a finished response
+     */
+    function renderAssistant(el, complete) {
       var content = el.querySelector(".message-content");
+      if (complete) {
+        el._finalized = true;
+        if (!el.querySelector(".response-actions") && hasCopyableResponse(el)) {
+          var actions = document.createElement("div");
+          actions.className = "response-actions";
+          var button = createCopyButton("Copy response", function () { return el._rt || ""; });
+          button.title = "Copy response as Markdown";
+          actions.appendChild(button);
+          // The control always sits above the text it copies.
+          if (content) el.insertBefore(actions, content);
+          else el.appendChild(actions);
+        }
+      }
       if (!content) {
-        var actions = document.createElement("div");
-        actions.className = "response-actions";
-        var button = createCopyButton("Copy response", function () { return el._rt || ""; });
-        button.title = "Copy response as Markdown (text received so far while streaming)";
-        actions.appendChild(button);
         content = document.createElement("div");
         content.className = "message-content";
-        el.appendChild(actions);
         el.appendChild(content);
       }
       content._rt = el._rt;
       renderTranscriptContent(content);
+    }
+
+    /**
+     * Close out every assistant block still open when a response ends. Text
+     * cut off by a tool call no longer belongs to `streamingEl`, so the whole
+     * transcript is scanned for blocks that never had their final render.
+     * @param {boolean} [offerCopy] - false seals blocks without adding the copy
+     *   control: the response failed, so nothing is offered.
+     */
+    function finalizeResponses(offerCopy) {
+      messagesEl.querySelectorAll(".message.assistant").forEach(function (el) {
+        if (el._finalized) return;
+        if (offerCopy === false) el._finalized = true;
+        else renderAssistant(el, true);
+      });
     }
 
     // ── scroll helpers ──
@@ -1063,8 +1097,9 @@
         el.className = "message " + role;
         if (msgId) el.dataset.msgId = msgId;
         if (role === "assistant") {
+          // Born finished: only restored history reaches this branch.
           el._rt = text;
-          renderAssistant(el);
+          renderAssistant(el, true);
           streamingEl = el;
           streamingMsgId = msgId;
         } else {
@@ -1508,11 +1543,20 @@
         renderAssistant(streamingEl);
         scrollToBottom();
       } else if (m.type === "responseComplete") {
+        // Offer the copy control now — but only to finished responses with text.
+        finalizeResponses();
         closeStream();
         hideThinking();
         cancelPendingApprovalCards();
         setBusy(false);
+        // The row above the text makes the message taller; stay pinned to the
+        // bottom so the last lines do not slide out of view (no effect if the
+        // user has scrolled up).
+        scrollToBottom();
       } else if (m.type === "error") {
+        // The response failed: seal open blocks without offering a copy
+        // control, so a later completion cannot add one retroactively.
+        finalizeResponses(false);
         closeStream();
         hideThinking();
         cancelPendingApprovalCards();
@@ -1548,6 +1592,12 @@
             addMsg("error", "Attachment error: " + err.name + " - " + err.error);
           });
         }
+      } else if (m.type === "busyChanged") {
+        // The host owns the truth about a request being in flight. A run that
+        // the host started (an agent tab) never went through sendMessage, so
+        // without this the composer would keep offering Send while the agent
+        // works — and its Stop button would be unreachable.
+        setBusy(!!m.busy);
       } else if (m.type === "agentCapacityChanged") {
         agentCapacity = m.capacity;
       } else if (m.type === "persistPanelState") {

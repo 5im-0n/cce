@@ -47,6 +47,9 @@ const { resolveModelId, resolveEffort } = require("./model-choice");
  * @property {() => { available: number, maximum: number }} [getAgentCapacity]
  * @property {(options: import("./agent").AgentRunOptions & { parentChatId: string }) => Promise<string>} [runAgent]
  * @property {() => void} [abortOwnedAgents] - Cancel agents spawned by this chat.
+ * @property {() => void} [onSelfStop] - This chat is itself an agent: the user
+ *   pressed its own Stop button. Called only from the webview's
+ *   `cancelMessage`, never from `abortAll`, so teardown paths cannot recurse.
  */
 
 /**
@@ -56,6 +59,9 @@ const { resolveModelId, resolveEffort } = require("./model-choice");
  * @property {boolean} [restoreCurrent] - Sidebar only: restore the persisted current session.
  * @property {boolean} [persistCurrent] - Sidebar only: mirror session changes into the
  *   persisted "current session" pointer so a reload restores it.
+ * @property {boolean} [isAgent] - This chat is a sub-agent run in its own tab.
+ * @property {string} [modelId] - Model the chat starts with.
+ * @property {string} [reasoningEffort] - Reasoning effort the chat starts with.
  * @property {ChatControllerHooks} hooks
  */
 
@@ -128,6 +134,17 @@ function createChatController(options) {
   }
 
   /**
+   * Tell the webview whether a request is in flight, so the composer shows Stop
+   * instead of Send. The webview cannot infer this: a run started by the host
+   * (an agent tab) never passes through the UI's own send path.
+   * @param {boolean} busy
+   * @returns {void}
+   */
+  function postBusy(busy) {
+    post({ type: "busyChanged", busy });
+  }
+
+  /**
    * Install (or replace) the message sink and replay the current state so a
    * freshly created webview shows the conversation.
    * @param {(msg: Record<string, any>) => void} nextSink
@@ -143,6 +160,9 @@ function createChatController(options) {
       post({ type: "historyRestored", messages: conversation });
     }
     if (hooks.getAgentCapacity) post({ type: "agentCapacityChanged", capacity: hooks.getAgentCapacity() });
+    // A recreated webview (tab moved, sidebar re-resolved) must not offer Send
+    // while this chat is still working.
+    postBusy(abortController !== null);
   }
 
   /**
@@ -570,6 +590,8 @@ function createChatController(options) {
    * @param {Array<{ id: string, name: string, dataUrl: string, size: number, warning: boolean }>} [images]
    * @param {string} [editingId] - when set, this is an edit confirm: replace
    *   the most recent user message with text/images and regenerate from there
+   * @param {AbortSignal} [externalSignal] - the host's own signal (an agent run
+   *   owned by the manager); aborting it cancels this request too
    * @returns {Promise<void>}
    */
   async function handleSendMessage(messageId, text, images, editingId, externalSignal) {
@@ -678,6 +700,10 @@ function createChatController(options) {
     // The abort controller is created up-front so the user's Stop button also
     // cancels a compaction pass that may run before the main request.
     abortController = new AbortController();
+    // Show Stop before the first token can arrive: the provider call, MCP
+    // discovery and compaction may all take long enough that no event reaches
+    // the webview for a while.
+    postBusy(true);
     const abortExternal = () => abortController && abortController.abort();
     if (externalSignal) {
       if (externalSignal.aborted) abortExternal();
@@ -721,9 +747,14 @@ function createChatController(options) {
         }
         if (proceed) {
           await compact(plan, modelConfig, apiKey, provider);
-          // The user may have hit Stop during the compaction call.
+          // The user may have hit Stop during the compaction call. Leave the
+          // chat settled: a leftover aborted controller would keep `isBusy`
+          // true (and the webview on Stop) until the next send.
           if (abortController && abortController.signal.aborted) {
+            abortController = null;
+            if (externalSignal) externalSignal.removeEventListener("abort", abortExternal);
             post({ type: "responseComplete", messageId });
+            postBusy(false);
             return;
           }
         }
@@ -744,6 +775,8 @@ function createChatController(options) {
     } finally {
       abortController = null;
       if (externalSignal) externalSignal.removeEventListener("abort", abortExternal);
+      // Last, so a webview that reacts by sending again sees a settled chat.
+      postBusy(false);
     }
   }
 
@@ -1177,6 +1210,7 @@ function createChatController(options) {
         }
         post({ type: "historyRestored", messages: conversation });
         if (hooks.getAgentCapacity) post({ type: "agentCapacityChanged", capacity: hooks.getAgentCapacity() });
+        postBusy(abortController !== null);
         break;
       case "sendMessage":
         void handleSendMessage(msg.messageId, msg.text, msg.images, msg.editingId);
@@ -1185,6 +1219,10 @@ function createChatController(options) {
         handleEditMessage(msg.id);
         break;
       case "cancelMessage":
+        // An agent tab's Stop must reach the run that started it: only the
+        // manager holds that signal, and without telling it the run would end
+        // "successfully" with a truncated answer.
+        if (isAgent && hooks.onSelfStop) hooks.onSelfStop();
         handleCancel();
         break;
       case "attachImage":
