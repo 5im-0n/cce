@@ -104,7 +104,6 @@ function setup(options) {
         dispose: () => {},
       }),
     },
-    [file("src/chat/agent.js")]: { runSubAgents: async () => "" },
   };
 
   const controllerPath = file("src/chat/controller.js");

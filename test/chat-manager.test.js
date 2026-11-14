@@ -45,8 +45,10 @@ test.after(() => {
  * @param {Array<any>} [options.sessions] - Sessions the store knows about.
  * @param {(sessionId: string) => boolean} [options.openSessionFails] -
  *   Force `openSession` to fail, simulating a session deleted in between.
- * @param {(options: any) => Promise<string>} [options.agentTaskRunner]
+ * @param {(options: any) => Promise<any>} [options.agentTaskRunner] - Resolves
+ *   to a TurnOutcome (or a string, treated as a completed turn with that text).
  * @param {boolean} [options.autoCloseAgents] - The `AutoCloseAgents` setting.
+ * @param {() => void} [options.onAgentTaskFinished] - Called when a run settles.
  */
 function setup(options = {}) {
   const sessions = options.sessions || [];
@@ -187,15 +189,25 @@ function setup(options = {}) {
           },
           onAgentCapacityChanged: () => {},
           registerOwnedAgent: () => () => {},
+          // Mirrors the real controller: resolves to a TurnOutcome. A string
+          // runner result is shorthand for a completed turn with that text.
           runAgentTask: async (agentOptions) => {
             controller.state.task = agentOptions.task;
-            return agentTaskRunner(agentOptions);
+            controller.state.agentRunning = true;
+            let outcome;
+            try {
+              outcome = await agentTaskRunner(agentOptions);
+            } finally {
+              controller.state.agentRunning = false;
+            }
+            if (typeof outcome === "string") {
+              controller.state.answer = outcome;
+              return { ok: true, aborted: false, error: null, text: outcome };
+            }
+            if (outcome && typeof outcome.text === "string") controller.state.answer = outcome.text;
+            return outcome;
           },
-          postAgentProgress: () => {},
-          postAgentChunk: () => {},
-          completeAgentTask: () => {},
-          failAgentTask: () => {},
-          getLastAssistantResponse: () => "fake result",
+          getLastAssistantResponse: () => state.answer || "",
           postModels: () => emit({ type: "modelsLoaded", models: [], activeModel: null }),
           postSessions: () => emit({ type: "sessionsLoaded", sessions: [], currentSessionId: state.sessionId || "" }),
           abortAll: () => {
@@ -292,24 +304,23 @@ test("visible sub-agents reserve the configured capacity and return results", as
   assert.deepEqual(manager.getAgentCapacity(), { maximum: 1, available: 0 });
   finishTask("analysis complete");
   const result = await run;
-  assert.match(result, /fake result/);
-  assert.match(result, /1 task\(s\) were not started/);
+  assert.match(result, /Agent 1 result:\nanalysis complete/);
+  assert.match(result, /1 of 2 sub-agents did not finish/);
+  assert.match(result, /agent 2 was not started/);
   assert.deepEqual(manager.getAgentCapacity(), { maximum: 1, available: 1 });
 });
 
-test("stopping an agent from its own tab keeps the tab and tells the parent", async () => {
+test("stopping an agent from its own tab keeps the tab and reports it as stopped", async () => {
   /** @type {AbortSignal | undefined} */
   let seen;
   const { manager, panels, controllers } = setup({
     maxAgents: 2,
     autoCloseAgents: true,
-    agentTaskRunner: (agentOptions) => new Promise((resolve, reject) => {
+    // Mirrors the real controller: an aborted turn resolves with `aborted`,
+    // carrying whatever the agent had produced so far.
+    agentTaskRunner: (agentOptions) => new Promise((resolve) => {
       seen = agentOptions.signal;
-      const onAbort = () => {
-        const error = new Error("Aborted");
-        error.name = "AbortError";
-        reject(error);
-      };
+      const onAbort = () => resolve({ ok: false, aborted: true, error: null, text: "partial findings" });
       if (agentOptions.signal.aborted) onAbort();
       else agentOptions.signal.addEventListener("abort", onAbort, { once: true });
     }),
@@ -333,21 +344,49 @@ test("stopping an agent from its own tab keeps the tab and tells the parent", as
 
   const result = await run;
   assert.ok(seen.aborted, "the run the manager owns was aborted");
-  assert.match(result, /stopped by the user/);
-  assert.doesNotMatch(result, /error/i, "a stop is not reported as a failure");
+  assert.match(result, /stopped before it finished/);
+  assert.match(result, /partial findings/, "the parent gets what the agent had produced");
+  assert.doesNotMatch(result, /failed/, "a stop is not reported as a failure");
   assert.equal(panels[0].disposed, false, "the tab stays open so its transcript can be read");
   assert.deepEqual(manager.getAgentCapacity(), { maximum: 2, available: 2 }, "the slot is freed");
+});
+
+test("closing an agent tab mid-run reports a stop, not a finished result", async () => {
+  const { manager, panels } = setup({
+    maxAgents: 2,
+    autoCloseAgents: true,
+    agentTaskRunner: (agentOptions) => new Promise((resolve) => {
+      const onAbort = () => resolve({ ok: false, aborted: true, error: null, text: "half done" });
+      if (agentOptions.signal.aborted) onAbort();
+      else agentOptions.signal.addEventListener("abort", onAbort, { once: true });
+    }),
+  });
+  manager.getSidebarChat();
+
+  const run = manager.runVisibleAgents({
+    parentChatId: "sidebar",
+    tasks: ["inspect A"],
+    modelConfig: { id: "m-one", modelId: "model-one", endpoint: "https://example.invalid" },
+    apiKey: "",
+    provider: {},
+    reasoningEffort: "medium",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // The user closes the stuck agent's tab instead of pressing Stop.
+  panels[0].dispose();
+
+  const result = await run;
+  assert.match(result, /closed its tab/, "the parent is told why it stopped");
+  assert.match(result, /half done/);
+  assert.doesNotMatch(result, /^Agent 1 result:/m, "the interrupted work is not reported as a result");
 });
 
 test("stopping the parent still cancels and closes its agent tabs", async () => {
   const { manager, panels, controllers } = setup({
     maxAgents: 2,
-    agentTaskRunner: (agentOptions) => new Promise((resolve, reject) => {
-      const onAbort = () => {
-        const error = new Error("Aborted");
-        error.name = "AbortError";
-        reject(error);
-      };
+    agentTaskRunner: (agentOptions) => new Promise((resolve) => {
+      const onAbort = () => resolve({ ok: false, aborted: true, error: null, text: "" });
       if (agentOptions.signal.aborted) onAbort();
       else agentOptions.signal.addEventListener("abort", onAbort, { once: true });
     }),
@@ -369,7 +408,73 @@ test("stopping the parent still cancels and closes its agent tabs", async () => 
   const result = await run;
 
   assert.equal(panels[0].disposed, true, "the agent tab is closed with the request that spawned it");
-  assert.match(result, /stopped by the user/);
+  assert.match(result, /stopped before it finished/);
+  assert.match(result, /parent request was stopped/);
+});
+
+test("a cancelled parent leaves no agent tab behind", async () => {
+  const { manager, panels } = setup({ maxAgents: 2 });
+  manager.getSidebarChat();
+  const controller = new AbortController();
+  controller.abort();
+
+  const result = await manager.runVisibleAgents({
+    parentChatId: "sidebar",
+    tasks: ["inspect A", "inspect B"],
+    modelConfig: { id: "m-one", modelId: "model-one", endpoint: "https://example.invalid" },
+    apiKey: "",
+    provider: {},
+    reasoningEffort: "medium",
+    signal: controller.signal,
+  });
+
+  assert.equal(panels.length, 0, "no tab is opened for a run that never started");
+  assert.match(result, /2 of 2 sub-agents did not finish/);
+  assert.match(result, /parent request was cancelled/);
+  assert.deepEqual(manager.getAgentCapacity(), { maximum: 2, available: 2 }, "no slot is leaked");
+});
+
+test("a failing agent says so, and its siblings still report their results", async () => {
+  const { manager } = setup({
+    maxAgents: 3,
+    agentTaskRunner: async (agentOptions) => {
+      if (agentOptions.task === "boom") throw new Error("429 rate limit");
+      return "found it";
+    },
+  });
+  manager.getSidebarChat();
+
+  const result = await manager.runVisibleAgents({
+    parentChatId: "sidebar",
+    tasks: ["good", "boom", "also good"],
+    modelConfig: { id: "m-one", modelId: "model-one", endpoint: "https://example.invalid" },
+    apiKey: "",
+    provider: {},
+    reasoningEffort: "medium",
+  });
+
+  assert.match(result, /1 of 3 sub-agents did not finish: agent 2 failed \(429 rate limit\)/);
+  assert.match(result, /Agent 1 result:\nfound it/, "a sibling's result is not lost");
+  assert.match(result, /Agent 3 result:\nfound it/);
+  assert.match(result, /Agent 2 output \(incomplete\)/);
+});
+
+test("a malformed tasks argument is answered, not thrown into the tool loop", async () => {
+  const { manager, panels } = setup();
+  manager.getSidebarChat();
+
+  for (const tasks of ["inspect A", 42, null, [], ["", "   "]]) {
+    const result = await manager.runVisibleAgents({
+      parentChatId: "sidebar",
+      tasks,
+      modelConfig: { id: "m-one", modelId: "model-one", endpoint: "https://example.invalid" },
+      apiKey: "",
+      provider: {},
+      reasoningEffort: "medium",
+    });
+    assert.match(result, /must be a non-empty array/, "tasks=" + JSON.stringify(tasks));
+  }
+  assert.equal(panels.length, 0);
 });
 
 test("each call opens another independent chat tab", async () => {

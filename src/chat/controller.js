@@ -14,7 +14,6 @@ const { formatTokenCount, estimateTextTokens, estimateMessageTokens } = require(
 const { computeBudget, pruneRounds, truncateToolResult, countToolCalls } = require("../context/guard");
 const { applyEdit, lastUserMessageIndex } = require("../conversation/edit");
 const { createApprovalGate } = require("./approvals");
-const { runSubAgents } = require("./agent");
 const { isAbortError } = require("./abort");
 const { handleCopyText: copyText } = require("./clipboard");
 const { resolveModelId, resolveEffort } = require("./model-choice");
@@ -45,7 +44,7 @@ const { resolveModelId, resolveEffort } = require("./model-choice");
  * @property {(msg: Record<string, any>) => void} onMessage - host message not handled here (e.g. configureModels).
  * @property {ChatActivityRegistry} activity - in-flight tool registry shared by all chats.
  * @property {() => { available: number, maximum: number }} [getAgentCapacity]
- * @property {(options: import("./agent").AgentRunOptions & { parentChatId: string }) => Promise<string>} [runAgent]
+ * @property {(options: import("./agent-run").AgentRunOptions & { parentChatId: string }) => Promise<string>} [runAgent]
  * @property {() => void} [abortOwnedAgents] - Cancel agents spawned by this chat.
  * @property {() => void} [onSelfStop] - This chat is itself an agent: the user
  *   pressed its own Stop button. Called only from the webview's
@@ -59,7 +58,9 @@ const { resolveModelId, resolveEffort } = require("./model-choice");
  * @property {boolean} [restoreCurrent] - Sidebar only: restore the persisted current session.
  * @property {boolean} [persistCurrent] - Sidebar only: mirror session changes into the
  *   persisted "current session" pointer so a reload restores it.
- * @property {boolean} [isAgent] - This chat is a sub-agent run in its own tab.
+ * @property {boolean} [isAgent] - This chat starts as a sub-agent run in its own tab.
+ *   Agent mode is run-scoped: `runAgentTask` sets it and clears it when the run
+ *   ends, so a tab the user keeps becomes an ordinary chat.
  * @property {string} [modelId] - Model the chat starts with.
  * @property {string} [reasoningEffort] - Reasoning effort the chat starts with.
  * @property {ChatControllerHooks} hooks
@@ -77,7 +78,11 @@ const { resolveModelId, resolveEffort } = require("./model-choice");
 function createChatController(options) {
   const { id: chatId, hooks } = options;
   const activity = hooks.activity;
-  const isAgent = options.isAgent === true;
+  // Agent mode is *run-scoped*, not a permanent property of the chat: an agent
+  // tab that the user keeps (and types into) is an ordinary chat afterwards, so
+  // it must get the `agent` tool back and stop forwarding its own Stop to a run
+  // that already ended.
+  let agentRun = options.isAgent === true;
   const initialModelId = options.modelId;
   /** @type {Set<{ cancel: () => void }>} */
   const ownedAgents = new Set();
@@ -106,6 +111,12 @@ function createChatController(options) {
   let title = "Chat";
   /** @type {boolean} */
   let disposed = false;
+  // What the current turn produced, kept so a turn that is stopped or fails can
+  // report its partial output instead of only its error. `turnStopReason` is
+  // "budget" when the loop guard stopped it gracefully (not a failure).
+  let turnStreamText = "";
+  /** @type {"budget" | null} */
+  let turnStopReason = null;
   // Only the sidebar chat mirrors its session into the persisted
   // "current session" pointer — editor tabs must not clobber what the sidebar
   // will restore on reload.
@@ -585,6 +596,14 @@ function createChatController(options) {
   }
 
   /**
+   * Run one turn of this conversation.
+   *
+   * Resolves to an outcome rather than throwing, because a caller that owns
+   * something outside this chat (the manager, for a sub-agent run) needs to know
+   * *why* the turn ended. Before this, every failure was posted to the webview
+   * and forgotten, so a crashed agent run was reported to its parent as a
+   * successful empty answer.
+   *
    * @param {string} messageId
    * @param {string} text
    * @param {Array<{ id: string, name: string, dataUrl: string, size: number, warning: boolean }>} [images]
@@ -592,38 +611,32 @@ function createChatController(options) {
    *   the most recent user message with text/images and regenerate from there
    * @param {AbortSignal} [externalSignal] - the host's own signal (an agent run
    *   owned by the manager); aborting it cancels this request too
-   * @returns {Promise<void>}
+   * @returns {Promise<import("./agent-run").TurnOutcome>}
    */
   async function handleSendMessage(messageId, text, images, editingId, externalSignal) {
+    /** @param {string} message */
+    const fail = (message) => {
+      postError(messageId, message);
+      return /** @type {import("./agent-run").TurnOutcome} */ ({ ok: false, aborted: false, error: message, text: "" });
+    };
+
     const models = Settings.getModels();
     const modelConfig = models.find((m) => m.id === activeModel) || models[0];
-    if (!modelConfig) {
-      postError(messageId, "No model configured. Click the settings gear to add one.");
-      return;
-    }
+    if (!modelConfig) return fail("No model configured. Click the settings gear to add one.");
     activeModel = modelConfig.id;
 
     const apiKey = (await Settings.getApiKey(modelConfig.id)) || "";
     const provider = getProvider(modelConfig.provider);
-    if (!provider) {
-      postError(messageId, "Unknown provider: " + modelConfig.provider);
-      return;
-    }
+    if (!provider) return fail("Unknown provider: " + modelConfig.provider);
     if (editingId) {
       // Edit confirm: replace the most recent user message in place and drop
       // everything after it (the old reply and any tool activity). The edit
       // is persisted before the request runs, so an aborted regeneration
       // still keeps the truncation. Pending approvals belonged to the turn
       // being discarded, so they are rejected.
-      if (abortController) {
-        postError(messageId, "Wait for the current response to finish before editing.");
-        return;
-      }
+      if (abortController) return fail("Wait for the current response to finish before editing.");
       const result = applyEdit(conversation, editingId, text, images || []);
-      if (!result.ok) {
-        postError(messageId, "Can't edit message: " + result.reason);
-        return;
-      }
+      if (!result.ok) return fail("Can't edit message: " + result.reason);
       approvals.rejectAll("Message edited");
       conversation = result.conversation;
       // Editing truncates the conversation; the summary must not reach past
@@ -637,11 +650,14 @@ function createChatController(options) {
       conversation.push({ role: "user", content: text, images: images || [], id: messageId });
       ensureSession();
     }
+    // Reset the per-turn bookkeeping the outcome report reads.
+    turnStreamText = "";
+    turnStopReason = null;
 
     // Gather enabled tools. The manager's capacity callback includes all live
     // agents across every chat, so the model sees current global capacity.
     const toolSettings = { ...Settings.getToolSettings() };
-    if (isAgent) toolSettings.agent = false;
+    if (agentRun) toolSettings.agent = false;
     let tools = getEnabledDefinitions(toolSettings, hooks.getAgentCapacity ? hooks.getAgentCapacity() : undefined);
 
     // Fetch MCP tools (both HTTP and stdio)
@@ -734,7 +750,7 @@ function createChatController(options) {
           ", folding " + plan.old.length + " messages"
         );
         let proceed = true;
-        if (compaction.mode === "ask") {
+        if (compaction.mode === "ask" && !agentRun) {
           const choice = await vscode.window.showWarningMessage(
             "Conversation is ~" + formatTokenCount(plan.estimate) +
             " tokens — over your " + formatTokenCount(compaction.threshold) +
@@ -744,6 +760,11 @@ function createChatController(options) {
             "Send anyway"
           );
           proceed = choice === "Compact";
+        } else if (compaction.mode === "ask") {
+          // An agent tab is unattended: asking would hang the run (and the
+          // parent's `agent` tool) on a notification nobody is watching. Compact
+          // like "auto" — the tab's own Stop still cancels the run.
+          log.appendLine("Compaction: agent run, compacting without asking");
         }
         if (proceed) {
           await compact(plan, modelConfig, apiKey, provider);
@@ -755,7 +776,7 @@ function createChatController(options) {
             if (externalSignal) externalSignal.removeEventListener("abort", abortExternal);
             post({ type: "responseComplete", messageId });
             postBusy(false);
-            return;
+            return { ok: false, aborted: true, error: null, text: "" };
           }
         }
       }
@@ -766,12 +787,20 @@ function createChatController(options) {
 
     try {
       await chatLoop(messageId, messages, modelConfig, apiKey, provider, tools, budget);
+      if (turnStopReason === "budget") {
+        // A graceful guard stop is not a failure: the chat has a partial answer
+        // and told the user why. The run that owns this turn is told the same.
+        return { ok: false, aborted: false, error: null, text: turnStreamText, stopReason: "budget" };
+      }
+      return { ok: true, aborted: false, error: null, text: turnStreamText };
     } catch (err) {
       if (isAbortError(err)) {
         post({ type: "responseComplete", messageId });
-        return;
+        return { ok: false, aborted: true, error: null, text: turnStreamText };
       }
-      postError(messageId, err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      postError(messageId, message);
+      return { ok: false, aborted: false, error: message, text: turnStreamText };
     } finally {
       abortController = null;
       if (externalSignal) externalSignal.removeEventListener("abort", abortExternal);
@@ -896,6 +925,8 @@ function createChatController(options) {
           "The results gathered so far are shown above. To continue, raise the compaction trigger threshold in settings, or split the request into smaller steps.";
         conversation.push({ role: "assistant", content: text });
         await saveSession();
+        turnStopReason = "budget";
+        turnStreamText = turnStreamText ? turnStreamText + "\n\n" + text : text;
         post({ type: "partialResponse", messageId, text });
         post({ type: "responseComplete", messageId });
         post({
@@ -918,7 +949,10 @@ function createChatController(options) {
     }
     const result = await provider.chat(
       messages, modelConfig.modelId, modelConfig.endpoint, apiKey,
-      (chunk) => post({ type: "partialResponse", messageId, text: chunk }),
+      (chunk) => {
+        turnStreamText += chunk;
+        post({ type: "partialResponse", messageId, text: chunk });
+      },
       signal,
       requestTools.length > 0 ? requestTools : undefined,
       (thinking) => post({ type: "thinkingDelta", messageId, text: thinking }),
@@ -969,26 +1003,23 @@ function createChatController(options) {
               const toolName = parts.slice(2).join("__");
               toolResult = await callMcpTool(serverId, toolName, toolArgs);
             } else if (tc.function.name === "agent") {
-              // Approving the agent call trusts everything its sub-agents do.
               // The manager reserves available slots atomically before creating
-              // visible child chats and returns their joined results.
-              if (hooks.runAgent && !isAgent) {
+              // visible child chats, and reports each child's outcome back.
+              // Approving the `agent` call is not a blanket grant: every child
+              // asks for its own tool calls in its own tab, exactly like a chat
+              // the user started (and an explicit `deny` policy still wins).
+              if (hooks.runAgent && !agentRun) {
                 toolResult = await hooks.runAgent({
                   parentChatId: chatId,
                   tasks: toolArgs.tasks || [],
                   modelConfig,
-                  apiKey,
-                  provider,
-                  budget,
                   reasoningEffort,
                   signal,
                 });
-              } else if (isAgent) {
+              } else if (agentRun) {
                 toolResult = "Error: agents cannot recursively spawn sub-agents.";
               } else {
-                toolResult = await runSubAgents({
-                  tasks: toolArgs.tasks || [], modelConfig, apiKey, provider, budget, reasoningEffort, signal,
-                });
+                toolResult = "Error: sub-agents are not available in this chat.";
               }
             } else {
               toolResult = await executeToolCall(
@@ -1055,6 +1086,10 @@ function createChatController(options) {
       log.appendLine("Fallback: sending thinking as response");
       post({ type: "partialResponse", messageId, text: result.thinking });
     }
+    // A provider that does not stream gives us the answer only here; keep it so
+    // the turn's outcome can report what was actually produced.
+    if (result.text) turnStreamText = result.text;
+    else if (result.thinking) turnStreamText = result.thinking;
 
     post({ type: "responseComplete", messageId });
   }
@@ -1221,8 +1256,9 @@ function createChatController(options) {
       case "cancelMessage":
         // An agent tab's Stop must reach the run that started it: only the
         // manager holds that signal, and without telling it the run would end
-        // "successfully" with a truncated answer.
-        if (isAgent && hooks.onSelfStop) hooks.onSelfStop();
+        // "successfully" with a truncated answer. `agentRun` is false once the
+        // run ended (the tab may then be an ordinary chat).
+        if (agentRun && hooks.onSelfStop) hooks.onSelfStop();
         handleCancel();
         break;
       case "attachImage":
@@ -1327,24 +1363,21 @@ function createChatController(options) {
       const capacity = hooks.getAgentCapacity ? hooks.getAgentCapacity() : null;
       if (sink && capacity) post({ type: "agentCapacityChanged", capacity });
     },
+    /**
+     * Run one task in this tab and report how it ended. The manager owns
+     * capacity, the tab and cancellation; this only runs the turn.
+     * @param {{ task: string, signal?: AbortSignal }} options
+     * @returns {Promise<import("./agent-run").TurnOutcome>}
+     */
     runAgentTask: async (options) => {
-      await handleSendMessage("agent-progress", String(options.task), [], undefined, options.signal);
-      if (options.signal && options.signal.aborted) {
-        const error = new Error("Aborted");
-        error.name = "AbortError";
-        throw error;
+      agentRun = true;
+      try {
+        return await handleSendMessage("agent-progress", String(options.task), [], undefined, options.signal);
+      } finally {
+        // The run itself is over either way; the tab lives on as a normal chat.
+        agentRun = false;
       }
-      const finalMessage = [...conversation].reverse().find((message) => message.role === "assistant");
-      return finalMessage && typeof finalMessage.content === "string" ? finalMessage.content : "(no output)";
     },
-    postAgentProgress: (text) => post({ type: "toolStatus", text }),
-    postAgentChunk: (text) => post({ type: "partialResponse", messageId: "agent-progress", text }),
-    completeAgentTask: (text) => {
-      conversation.push({ role: "assistant", content: text });
-      void saveSession();
-      post({ type: "responseComplete", messageId: "agent-progress" });
-    },
-    failAgentTask: (message) => post({ type: "error", messageId: "agent-progress", error: message }),
   };
 }
 

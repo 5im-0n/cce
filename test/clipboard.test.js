@@ -65,7 +65,6 @@ function setup(writeText) {
         dispose: () => {},
       }),
     },
-    "./agent": { runSubAgents: async () => "" },
   };
 
   const sandbox = {

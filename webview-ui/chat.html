@@ -1153,7 +1153,7 @@
       var isMcp = m.toolName.indexOf("mcp__") === 0;
       var note = "";
       if (m.toolName === "agent") {
-        note = "<div class='ac-note'>Approving spawns sub-agents that can run any tool without further approval.</div>";
+        note = "<div class='ac-note'>Approving spawns sub-agent tabs. Each one asks for its own tool approvals in its own tab, like a chat you started.</div>";
       } else if (isMcp) {
         note = "<div class='ac-note'>Approval is per server and applies to all tools this server exposes. \"Allow for this session\" covers every tool on this server until the session changes.</div>";
       }

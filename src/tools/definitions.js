@@ -160,7 +160,8 @@ The scan stops after ${MAX_FILES_SCANNED.toLocaleString("en-US")} files; results
         "Spawn parallel sub-agents to work on multiple independent tasks simultaneously. " +
         "Each sub-agent opens in its own visible CCE editor tab, runs independently, and returns its final result here; this call waits for the agents it starts. " +
         "Use this when you can break work into parallel pieces (e.g., searching multiple files, analyzing different parts of code, researching multiple topics at once). " +
-        "Sub-agents have access to enabled tools and can execute multiple tool-calling rounds (up to 10) before returning a final result. " +
+        "Sub-agents have the same tools as a normal chat, run as many tool rounds as they need until they answer or reach the context budget, and each asks for its own tool approvals in its own tab. " +
+        "The user can stop any of them; a stopped, failed or never-started agent says so in the result, along with whatever it produced. " +
         "Give each sub-agent a complete, self-contained prompt with enough context to work independently. " +
         "The current available simultaneous-agent capacity is supplied below; do not submit more tasks than that.",
       parameters: {

@@ -47,6 +47,7 @@ const model = {
  * @param {any} options.provider - Fake provider whose `chat` records calls.
  * @param {any} [options.compaction] - Compaction settings.
  * @param {any} [options.plan] - Compaction plan returned by planCompaction.
+ * @param {(options: any) => Promise<string>} [options.runAgent] - Host agent runner.
  */
 function setupController(options) {
   const settings = {
@@ -123,6 +124,9 @@ function setupController(options) {
       onTitleChanged: () => {},
       onMessage: () => {},
       activity: { start: () => {}, end: () => {}, warningsFor: () => [] },
+      runAgent: options.runAgent
+        ? (agentOptions) => options.runAgent(agentOptions)
+        : undefined,
     },
   });
 
@@ -195,42 +199,40 @@ test("compaction passes parameters despite turning off generated reasoning", asy
   assert.ok(compactionCall, "compaction provider call happened");
 });
 
-test("every sub-agent round and final max-rounds summary receives parameters", async () => {
+test("the agent tool delegates to the host instead of running sub-agents here", async () => {
+  // Sub-agents are ordinary chats in their own tabs, owned by the manager: the
+  // controller must not run them itself (there is only one implementation, and
+  // it is the visible one). Their provider calls therefore carry the same
+  // per-model parameters as any chat, which the tests above pin.
   let agentSpawned = false;
-  let agentRounds = 0;
-  let finalSummary = 0;
-  const firstContent = (args) => {
-    const first = args[0][0];
-    return typeof first.content === "string" ? first.content : "";
-  };
+  /** @type {Array<Record<string, any>>} */
+  const hostCalls = [];
   const provider = {
     chat: async (...args) => {
       checkArguments(args, "high");
-      const all = args[0].map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
-      if (all.includes("maximum number of tool-calling rounds")) {
-        finalSummary++;
-        return { text: "Final summary" };
-      }
-      if (firstContent(args) === "Read") {
-        // Sub-agent round: keep asking for a tool until the round cap.
-        agentRounds++;
-        return { text: "", toolCalls: [{ id: "call" + agentRounds, function: { name: "read_file", arguments: "{}" } }] };
-      }
-      // Main chat: ask for the agent once, then answer normally.
       if (!agentSpawned) {
         agentSpawned = true;
         return {
           text: "",
-          toolCalls: [{ id: "agent-call", function: { name: "agent", arguments: JSON.stringify({ tasks: ["Read"] }) } }],
+          toolCalls: [{ id: "agent-call", function: { name: "agent", arguments: JSON.stringify({ tasks: ["Read A", "Read B"] }) } }],
         };
       }
       return { text: "Finished" };
     },
   };
-  const { controller } = setupController({ provider });
+  const { controller } = setupController({
+    provider,
+    runAgent: async (agentOptions) => {
+      hostCalls.push(agentOptions);
+      return "Agent 1 result:\nA";
+    },
+  });
   controller.handleMessage({ type: "sendMessage", messageId: "message", text: "Investigate" });
 
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(agentRounds, 10, "sub-agent loop ran the full number of tool rounds");
-  assert.equal(finalSummary, 1, "max-rounds summary was requested once");
+  assert.equal(hostCalls.length, 1, "the host owns the run");
+  assert.deepEqual(hostCalls[0].tasks, ["Read A", "Read B"]);
+  assert.equal(hostCalls[0].modelConfig, model);
+  assert.equal(hostCalls[0].reasoningEffort, "high");
+  assert.ok(hostCalls[0].signal, "the run is cancellable by the parent's Stop");
 });

@@ -8,6 +8,7 @@ const { createOwnership } = require("./ownership");
 const { createSidebarViewHost, createEditorChatPanel, attachEditorChatPanel } = require("./view");
 const { withoutEmptySessions } = require("../config/sessionStore");
 const { PANEL_VIEW_TYPE, decodePanelState } = require("./panel-state");
+const { normalizeTasks, formatAgentReport } = require("./agent-run");
 
 /**
  * Owns every open chat and the rules that keep them from fighting.
@@ -32,7 +33,10 @@ const SIDEBAR_CHAT_ID = "sidebar";
  * @property {boolean} [agentRunning]
  * @property {number} [pendingAgentCount]
  * @property {string} [parentChatId]
- * @property {(options?: { closeTab?: boolean }) => void} [cancelAgent]
+ * @property {(options?: { closeTab?: boolean, reason?: string }) => void} [cancelAgent]
+ * @property {() => void} [onAgentTabClosed] - This chat's tab was closed while it
+ *   was still running a sub-agent task: stop the run so the parent is not told
+ *   the interrupted work finished.
  */
 
 /**
@@ -132,7 +136,7 @@ function createChatManager(context) {
   function cancelAgentsForParent(parentChatId) {
     for (const agent of chats.values()) {
       if (agent.parentChatId === parentChatId && agent.agentRunning && agent.cancelAgent) {
-        agent.cancelAgent();
+        agent.cancelAgent({ reason: "its parent request was stopped" });
       }
     }
   }
@@ -140,69 +144,134 @@ function createChatManager(context) {
   /**
    * Spawn visible agent chats, reserving the available slots synchronously so
    * concurrent parent requests cannot exceed the configured global maximum.
-   * @param {import("./agent").AgentRunOptions & { parentChatId: string }} options
+   *
+   * Every task is reported individually: a child that failed, was stopped, or
+   * never started says so, instead of arriving as an empty answer. Capacity is
+   * a hard limit — the tasks that do not fit are reported as not started rather
+   * than queued, so the parent model never waits on work nobody is running.
+   *
+   * @param {import("./agent-run").AgentRunOptions & { parentChatId: string }} options
    * @returns {Promise<string>}
    */
   async function runVisibleAgents(options) {
     const parentChat = chats.get(options.parentChatId);
     if (!parentChat) return "Error: parent chat is no longer open.";
-    const tasks = Array.isArray(options.tasks) ? options.tasks : [];
-    if (tasks.length === 0) return "No tasks provided.";
-    if (options.signal && options.signal.aborted) return "No agents spawned: the parent request was cancelled.";
+    // A malformed `tasks` argument must not throw inside the tool loop: the
+    // model would get a protocol error instead of something it can correct.
+    const tasks = normalizeTasks(options.tasks);
+    if (tasks.length === 0) {
+      return "No agents spawned: the `tasks` argument must be a non-empty array of prompt strings.";
+    }
+    if (options.signal && options.signal.aborted) {
+      return formatAgentReport(
+        tasks.map((_, index) => ({ index, outcome: "skipped", reason: "the parent request was cancelled" }))
+      );
+    }
 
     const capacity = Settings.getMaxSimultaneousAgents();
     const available = Math.max(0, capacity - getRunningAgentCount());
-    const accepted = tasks.slice(0, available);
-    const rejected = tasks.length - accepted.length;
-    if (accepted.length === 0) {
-      return "No agents spawned: capacity is full (0 of " + capacity + " available). Wait for an agent to finish and try again.";
+    if (available === 0) {
+      return "No agents spawned: all " + capacity + " simultaneous-agent slot" + (capacity === 1 ? " is" : "s are") +
+        " in use, so none of the " + tasks.length + " task(s) started. " +
+        "Tell the user agent capacity is full — they can stop an agent or raise the limit in settings — " +
+        "or do this work yourself with the normal tools.";
     }
+    const accepted = tasks.slice(0, available);
 
     // Reserve before any async work (MCP discovery/panel setup) to close the
     // race between simultaneous agent tool calls.
     parentChat.pendingAgentCount = (parentChat.pendingAgentCount || 0) + accepted.length;
     refreshAgentCapacity();
+
+    /** @type {Array<Promise<import("./agent-run").AgentTaskReport>>} */
     const jobs = accepted.map((task, index) => spawnVisibleAgent(options, task, index));
-    const results = await Promise.all(jobs);
-    const suffix = rejected > 0 ? "\n\n" + rejected + " task(s) were not started because the simultaneous-agent limit was reached." : "";
-    return results.join("\n\n") + suffix;
+    // Settle independently: one child whose construction throws must not erase
+    // the results of its siblings, and a rejection must not skip the ones still
+    // running.
+    const settled = await Promise.allSettled(jobs);
+
+    /** @type {Array<import("./agent-run").AgentTaskReport>} */
+    const reports = settled.map((result, index) => {
+      if (result.status === "fulfilled") return result.value;
+      const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      log.appendLine("Agent " + (index + 1) + ": run crashed: " + reason);
+      return { index, outcome: "error", reason };
+    });
+    for (let index = accepted.length; index < tasks.length; index++) {
+      reports.push({
+        index,
+        outcome: "skipped",
+        reason: "the simultaneous-agent limit (" + capacity + ") was reached",
+      });
+    }
+
+    return formatAgentReport(reports);
   }
 
   /**
-   * Create and run a child chat. Its webview receives streamed content and
-   * tool updates through the same controller protocol used by ordinary chats.
-   * @param {import("./agent").AgentRunOptions & { parentChatId: string }} options
+   * Create and run one child chat. Its webview receives streamed content and
+   * tool updates through the same controller protocol used by ordinary chats,
+   * and it asks for its own tool approvals in its own tab — exactly like a chat
+   * the user started.
+   *
+   * @param {import("./agent-run").AgentRunOptions & { parentChatId: string }} options
    * @param {string} task
    * @param {number} index
-   * @returns {Promise<string>}
+   * @returns {Promise<import("./agent-run").AgentTaskReport>}
    */
   async function spawnVisibleAgent(options, task, index) {
     const parent = chats.get(options.parentChatId);
     if (parent) parent.pendingAgentCount = Math.max(0, (parent.pendingAgentCount || 0) - 1);
     if (disposed || !parent) {
       refreshAgentCapacity();
-      return "Agent " + (index + 1) + " was not started because its parent chat closed.";
+      return { index, outcome: "skipped", reason: "its parent chat closed" };
+    }
+    if (options.signal && options.signal.aborted) {
+      refreshAgentCapacity();
+      return { index, outcome: "skipped", reason: "the parent request was cancelled" };
     }
 
     const agentId = newChatId();
-    const agentChat = buildController(agentId, {
-      isAgent: true,
-      modelId: options.modelConfig.id,
-      reasoningEffort: options.reasoningEffort,
-    });
+    /** @type {import("./controller").ChatController} */
+    let agentChat;
+    try {
+      agentChat = buildController(agentId, {
+        isAgent: true,
+        modelId: options.modelConfig.id,
+        reasoningEffort: options.reasoningEffort,
+      });
+    } catch (e) {
+      refreshAgentCapacity();
+      const reason = e instanceof Error ? e.message : String(e);
+      return { index, outcome: "error", reason: "the agent chat could not be created: " + reason };
+    }
+
     const agentAbortController = new AbortController();
     const abortFromParent = () => agentAbortController.abort();
     const entry = chats.get(agentId);
+    if (!entry) {
+      refreshAgentCapacity();
+      return { index, outcome: "error", reason: "the agent chat could not be created" };
+    }
     if (options.signal) {
       if (options.signal.aborted) abortFromParent();
       else options.signal.addEventListener("abort", abortFromParent, { once: true });
     }
-    if (!entry) return "Agent " + (index + 1) + " could not be created.";
     entry.agentRunning = true;
     entry.parentChatId = options.parentChatId;
 
+    /** Why the run ended early, when the user caused it. */
+    let stoppedBy = /** @type {string | null} */ (null);
+
+    /**
+     * Abort this run. Reached from three places, each of which must say why:
+     * the tab's own Stop (`onSelfStop`), closing the tab (through `closeChat`),
+     * and the parent stopping its agents.
+     * @param {{ closeTab?: boolean, reason?: string }} [cancelOptions]
+     */
     const cancelAgent = (cancelOptions = {}) => {
       if (agentAbortController.signal.aborted) return;
+      stoppedBy = cancelOptions.reason || "the user stopped it";
       agentAbortController.abort();
       entry.cancelAgent = undefined;
       agentChat.abortAll();
@@ -214,48 +283,108 @@ function createChatManager(context) {
       if (current && current.panelHost) current.panelHost.panel.dispose();
     };
     entry.cancelAgent = cancelAgent;
+    // A closed tab means the same thing as Stop. `closeChat` runs *after* the
+    // panel is gone, so it is the reliable place to notice it: the panel's own
+    // dispose event is the only signal a user-closed agent tab leaves behind.
+    entry.onAgentTabClosed = () => {
+      if (!entry.agentRunning) return; // auto-close after a finished run
+      cancelAgent({ closeTab: false, reason: "the user closed its tab" });
+    };
+    // Registering with the parent is what makes the parent's Stop reach this run
+    // (`abortAll` cancels every agent it owns). That is a parent-initiated stop,
+    // not the user pressing this tab's own Stop, so say so in the report.
     const unregister = typeof parent.controller.registerOwnedAgent === "function"
-      ? parent.controller.registerOwnedAgent({ cancel: cancelAgent })
+      ? parent.controller.registerOwnedAgent({ cancel: () => cancelAgent({ reason: "its parent request was stopped" }) })
       : () => {};
-    if (agentAbortController.signal.aborted) cancelAgent();
 
-    try {
-      const host = createEditorChatPanel(context, agentChat, closeChat, { preserveFocus: true });
-      entry.panelHost = host;
-      setChatTitle(agentId, "Agent " + (index + 1) + ": " + (String(task).slice(0, 48) || "Task"));
-      const result = await agentChat.runAgentTask({
-        task: String(task),
-        modelConfig: options.modelConfig,
-        apiKey: options.apiKey,
-        provider: options.provider,
-        budget: options.budget,
-        reasoningEffort: options.reasoningEffort,
-        signal: agentAbortController.signal,
-        onProgress: (text) => agentChat.postAgentProgress(text),
-      });
-      const finalResult = extractFinalAgentResponse(agentChat, result);
+    /**
+     * Undo the reservation without ever running the task. The tab must not be
+     * created at all: a panel opened for a run that is already cancelled would
+     * look like a live agent and outlive the request that spawned it. The chat
+     * entry is dropped too, so a cancelled run leaves nothing behind.
+     * @param {string} reason
+     * @returns {import("./agent-run").AgentTaskReport}
+     */
+    const skip = (reason) => {
       entry.agentRunning = false;
       entry.cancelAgent = undefined;
+      entry.onAgentTabClosed = undefined;
+      unregister();
+      if (options.signal) options.signal.removeEventListener("abort", abortFromParent);
+      // No panel was ever attached, so nothing else will ever close this chat.
+      chats.delete(agentId);
+      try {
+        agentChat.dispose();
+      } catch (e) {
+        log.appendLine("Agent " + (index + 1) + ": dispose after skip failed: " + (e instanceof Error ? e.message : String(e)));
+      }
+      refreshAgentCapacity();
+      parent.controller.onAgentCapacityChanged();
+      return { index, outcome: "skipped", reason };
+    };
+
+    // The parent stopped its agents before this one even had a tab.
+    if (agentAbortController.signal.aborted) return skip("the run was cancelled before its tab opened");
+
+    let host;
+    try {
+      host = createEditorChatPanel(context, agentChat, closeChat, { preserveFocus: true });
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      return skip("its tab could not be opened: " + reason);
+    }
+    entry.panelHost = host;
+    setChatTitle(agentId, "Agent " + (index + 1) + ": " + (String(task).slice(0, 48) || "Task"));
+
+    try {
+      const outcome = await agentChat.runAgentTask({
+        task: String(task),
+        signal: agentAbortController.signal,
+      });
+
+      // Report before the auto-close check: disposing the panel must not look
+      // like the user stopping the run.
+      entry.agentRunning = false;
+      entry.cancelAgent = undefined;
+
+      /** @type {import("./agent-run").AgentTaskReport} */
+      let report;
+      if (agentAbortController.signal.aborted || outcome.aborted) {
+        report = {
+          index,
+          outcome: "stopped",
+          reason: stoppedBy || "the user stopped it",
+          text: outcome.text,
+        };
+      } else if (outcome.stopReason === "budget") {
+        report = { index, outcome: "budget", reason: "it reached the context budget", text: outcome.text };
+      } else if (!outcome.ok) {
+        report = { index, outcome: "error", reason: outcome.error || "the run failed", text: outcome.text };
+      } else {
+        report = { index, outcome: "ok", text: extractFinalAgentResponse(agentChat, outcome.text) };
+      }
+
       refreshAgentCapacity();
       agentChat.onAgentCapacityChanged();
-      // Stop landed while the run was unwinding: treat it as a user stop so the
-      // tab is not auto-closed and the parent is not told the work finished.
-      if (agentAbortController.signal.aborted) {
-        return "Agent " + (index + 1) + " was stopped by the user. Its work is incomplete — do not retry it, report the partial result instead.";
+      // A stopped or failed run keeps its tab: the user may want to read it.
+      if (report.outcome === "ok" && Settings.getAutoCloseAgents() && entry.panelHost) {
+        entry.panelHost.panel.dispose();
       }
-      if (Settings.getAutoCloseAgents() && entry.panelHost) entry.panelHost.panel.dispose();
-      return "Agent " + (index + 1) + " result:\n" + finalResult;
+      return report;
     } catch (e) {
+      // runAgentTask is not supposed to throw; if it does, say so instead of
+      // reporting an empty success.
       entry.agentRunning = false;
       entry.cancelAgent = undefined;
       const message = e instanceof Error ? e.message : String(e);
-      // A user stop is not a failure: tell the parent model clearly that the
-      // work was interrupted and must not be retried as if it had crashed.
       if (agentAbortController.signal.aborted) {
-        return "Agent " + (index + 1) + " was stopped by the user. Its work is incomplete — do not retry it, report the partial result instead.";
+        return { index, outcome: "stopped", reason: stoppedBy || "the user stopped it" };
       }
-      return "Agent " + (index + 1) + " error: " + message;
+      return { index, outcome: "error", reason: message };
     } finally {
+      entry.agentRunning = false;
+      entry.cancelAgent = undefined;
+      entry.onAgentTabClosed = undefined;
       if (options.signal) options.signal.removeEventListener("abort", abortFromParent);
       unregister();
       refreshAgentCapacity();
@@ -263,14 +392,15 @@ function createChatManager(context) {
   }
 
   /**
-   * Extract the final assistant content from the child transcript, rather than
-   * returning the UI's sentinel completion string to the parent model.
+   * Prefer the child transcript's final assistant message over the streamed
+   * text: a provider that does not stream only produces the answer there.
+   * @param {import("./controller").ChatController} agentChat
    * @param {string} fallback
    * @returns {string}
    */
   function extractFinalAgentResponse(agentChat, fallback) {
     const answer = agentChat.getLastAssistantResponse && agentChat.getLastAssistantResponse();
-    return answer || fallback || "(no output)";
+    return answer || fallback || "";
   }
 
   /**
@@ -524,6 +654,9 @@ function createChatManager(context) {
     const chat = chats.get(chatId);
     if (!chat) return;
     try {
+      // Closing a tab that is running an agent job must stop that job: a child
+      // that keeps unwinding would report its truncated work as a result.
+      if (chat.onAgentTabClosed) chat.onAgentTabClosed();
       chat.controller.abortAll();
       await chat.controller.saveSession();
     } catch (e) {

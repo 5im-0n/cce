@@ -153,7 +153,7 @@ Every tool call is gated by an approval policy before it executes:
   - **Always allow this tool** — persist "auto" for this tool, revocable in Settings → Tools *(for MCP tools this becomes "Always allow this server")*
   - **Deny** — refuse; the model is told the call was denied and must adapt
 - **MCP approval is server-level.** An Auto / Ask / Deny dropdown on each server card in **Settings → MCP** applies to *every* tool that server exposes. Per-tool and per-session overrides do not apply to MCP tools; a stale per-tool entry is ignored.
-- Approving the **Agent** tool trusts everything its sub-agents do (they run without further prompts).
+- Approving the **Agent** tool only allows that one call to spawn tabs. **Each sub-agent asks for its own approvals in its own tab**, exactly like a chat you started: approving `agent` is not a blanket grant, and a tool or MCP server you set to **Deny** stays denied inside sub-agents too.
 - Pending requests are **auto-denied** after 5 minutes, and denied immediately if you cancel the message, switch sessions, or close the chat.
 - Approvals are **per chat**: a card answered in one tab never releases a tool call in another. "Always allow" is global (it changes the tool's policy in Settings → Tools); "Allow for this session" covers only the chat you answered in.
 - Approvals are not inherited by chats opened afterwards: a new tab starts from the configured policies again.
@@ -168,7 +168,9 @@ Add Model Context Protocol servers via **Settings → MCP**. Each server needs a
 More than one conversation can run at the same time. The sidebar chat is the default; open additional ones in editor tabs with **CCE: New Chat Tab** (the `+` button in the chat header, the `↗` button next to any session, or the command palette). Drag the tabs wherever you like — one tab on the login flow, another on a report.
 
 - Each chat has **its own conversation, session, model, reasoning effort, Stop button and approval cards** — answering an approval in one tab can never release a tool call in another.
-- **Sub-agent tabs have their own Stop button.** Stopping an agent in its own tab cancels that run only: the tab stays open with the work it did so far (so you can read it), and the parent model is told the work was stopped rather than failed, so it reports the partial result instead of retrying. Stopping the *parent* chat stops every agent it spawned and closes their tabs.
+- **Sub-agent tabs have their own Stop button.** Stopping an agent in its own tab cancels that run only: the tab stays open with the work it did so far (so you can read it), and the parent model is told the work was stopped rather than failed, so it reports the partial result instead of retrying. Closing an agent tab mid-run does the same thing. Stopping the *parent* chat stops every agent it spawned and closes their tabs.
+- **Every agent reports how it ended.** The parent model sees per-agent results, and a run where some agents failed, were stopped, or never started (because the simultaneous-agent limit was reached) opens with one line saying which and why — so an interrupted agent is never mistaken for one that answered.
+- Agent tabs are ordinary chats: once a run ends, the tab behaves exactly like one you opened yourself (including its own session in the session list). Turn on **Settings → Tools → Automatically close agent tabs when they finish** if you would rather not keep them.
 - A session is shown by **one chat at a time**. Opening a session that another tab already has reveals that tab instead of forking the transcript; the session list marks such sessions.
 - **Closing a tab aborts its in-flight request**, denies pending approvals and saves the transcript. The session can then be reopened anywhere.
 - **Tabs survive a window reload**: each tab remembers the session it was showing and comes back on the same conversation. A tab whose session was deleted returns as a fresh chat rather than disappearing.
