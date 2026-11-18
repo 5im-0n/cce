@@ -15,10 +15,16 @@
  *   3. reports whether the request is still over budget so the caller can
  *      stop gracefully instead of sending a doomed request.
  *
+ * Rounds are also persisted with the transcript (see `history.js`), so they
+ * live inside older turns too. A round found anywhere in the request is a
+ * pruning candidate: the guard walks the whole array, not just the tail after
+ * the last user message.
+ *
  * Pure module (no vscode dependency) so it can run under `node --test`.
  */
 
 const { estimateMessages } = require("./estimate");
+const { collectRounds, removedRoundsMarker } = require("./history");
 
 /** Fraction of the threshold reserved for output/reasoning tokens. */
 const RESERVE_RATIO = 0.1;
@@ -50,8 +56,7 @@ function computeBudget(threshold) {
 /**
  * Split a chat messages array into the prefix (everything up to and including
  * the last user message — system prompt, history, current user message) and
- * the whole tool rounds that follow it. A round is an assistant message with
- * tool_calls plus every immediately-following tool result message.
+ * the whole tool rounds that follow it.
  * @param {ConversationMessage[]} messages
  * @returns {{ roundsStart: number, rounds: Array<{ start: number, end: number, tokens: number }> }}
  */
@@ -64,23 +69,7 @@ function splitRounds(messages) {
     }
   }
   const roundsStart = lastUser + 1;
-  /** @type {Array<{ start: number, end: number, tokens: number }>} */
-  const rounds = [];
-  let i = roundsStart;
-  while (i < messages.length) {
-    const m = messages[i];
-    if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
-      let j = i + 1;
-      while (j < messages.length && messages[j].role === "tool") j++;
-      rounds.push({ start: i, end: j, tokens: estimateMessages(messages.slice(i, j)) });
-      i = j;
-    } else {
-      // Defensive: a message in the rounds region that isn't a round start
-      // (e.g. a dangling text message) is treated as its own round.
-      rounds.push({ start: i, end: i + 1, tokens: estimateMessages([m]) });
-      i++;
-    }
-  }
+  const rounds = collectRounds(messages).filter((round) => round.start >= roundsStart);
   return { roundsStart, rounds };
 }
 
@@ -89,7 +78,11 @@ function splitRounds(messages) {
  * the budget. Mutates `messages` in place. Guardrails:
  *   - the newest round is never dropped (MIN_KEEP_ROUNDS);
  *   - at most a ~40K-token cushion of recent rounds is kept;
- *   - pruning only happens when it frees at least MIN_FREED_TOKENS.
+ *   - pruning only happens when it frees at least MIN_FREED_TOKENS;
+ *   - only whole rounds go, so the `assistant(tool_calls)` → `tool` pairing
+ *     stays valid for both providers;
+ *   - a marker message is left where the rounds were removed, so the model
+ *     knows those results are gone rather than empty.
  * Returns the resulting estimate and whether the request is still over budget
  * (in which case the caller should stop gracefully — a doomed request must
  * never be sent).
@@ -103,7 +96,7 @@ function pruneRounds(messages, budget) {
     return { estimate, overBudget: false, droppedRounds: 0, freedTokens: 0 };
   }
 
-  const { roundsStart, rounds } = splitRounds(messages);
+  const rounds = collectRounds(messages);
   if (rounds.length <= MIN_KEEP_ROUNDS) {
     // Nothing droppable — a single round (or none) plus history is over budget.
     return { estimate, overBudget: true, droppedRounds: 0, freedTokens: 0 };
@@ -112,7 +105,7 @@ function pruneRounds(messages, budget) {
   // Cumulative freed tokens: freed[i] = tokens of rounds[0..i-1].
   /** @type {number[]} */
   const freed = [0];
-  for (const r of rounds) freed.push(freed[freed.length - 1] + r.tokens);
+  for (const round of rounds) freed.push(freed[freed.length - 1] + round.tokens);
 
   // Cushion cap: how many newest rounds we are willing to keep.
   let cushionKeep = 0;
@@ -148,9 +141,30 @@ function pruneRounds(messages, budget) {
     return { estimate, overBudget: true, droppedRounds: 0, freedTokens: 0 };
   }
 
-  const removeEnd = rounds[dropCount - 1].end;
-  messages.splice(roundsStart, removeEnd - roundsStart);
-  return { estimate: estimate - freedTokens, overBudget: false, droppedRounds: dropCount, freedTokens };
+  // The dropped rounds are the oldest ones, so their positions are contiguous
+  // from the start of the array (other messages between rounds are kept).
+  /** @type {Set<number>} */
+  const remove = new Set();
+  for (let r = 0; r < dropCount; r++) {
+    for (let i = rounds[r].start; i < rounds[r].end; i++) remove.add(i);
+  }
+  const markerAt = rounds[0].start;
+  /** @type {ConversationMessage[]} */
+  const kept = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (i === markerAt) kept.push(removedRoundsMarker(dropCount));
+    if (!remove.has(i)) kept.push(messages[i]);
+  }
+  messages.length = 0;
+  messages.push(...kept);
+
+  const nextEstimate = estimateMessages(messages);
+  return {
+    estimate: nextEstimate,
+    overBudget: nextEstimate > budget,
+    droppedRounds: dropCount,
+    freedTokens: estimate - nextEstimate,
+  };
 }
 
 /**

@@ -80,6 +80,36 @@ test("buildSummaryRequest flags images as omitted instead of embedding them", ()
   assert.ok(!req[1].content.includes("base64"));
 });
 
+test("buildSummaryRequest renders tool rounds instead of folding them in as empty turns", () => {
+  // Tool rounds are part of the transcript now. A summary that showed them as
+  // "Assistant: " would lose everything the tools found.
+  const oldTurns = [
+    { role: "user", content: "read src/a.js" },
+    { role: "assistant", content: null, tool_calls: [{ id: "c1", function: { name: "read_file", arguments: '{"path":"src/a.js"}' } }] },
+    { role: "tool", tool_call_id: "c1", content: "export const a = 1;" },
+    { role: "assistant", content: "It exports a." },
+  ];
+  const req = buildSummaryRequest(null, oldTurns);
+  const body = req[1].content;
+  assert.match(body, /called tools: read_file\(\{"path":"src\/a\.js"\}\)/);
+  assert.match(body, /Tool result: export const a = 1;/);
+  assert.match(body, /Assistant: It exports a\./);
+  assert.ok(!/Assistant: \n/.test(body), "no empty assistant line for a tool-call carrier");
+});
+
+test("buildSummaryRequest clips huge tool output so the summary request stays small", () => {
+  const oldTurns = [{ role: "tool", tool_call_id: "c1", content: "y".repeat(50000) }];
+  const req = buildSummaryRequest(null, oldTurns);
+  assert.ok(req[1].content.length < 2000, "the result head is kept, not the whole output");
+  assert.match(req[1].content, /Tool result: y{800}/);
+});
+
+test("buildSummaryRequest labels a retention marker as a note", () => {
+  const oldTurns = [{ role: "system", content: "3 older tool rounds removed", notice: true }];
+  const req = buildSummaryRequest(null, oldTurns);
+  assert.match(req[1].content, /Note: 3 older tool rounds removed/);
+});
+
 // ── planCompaction ──────────────────────────────────────────
 
 test("planCompaction does nothing below the threshold", () => {

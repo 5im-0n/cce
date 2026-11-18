@@ -55,6 +55,30 @@ async function executeToolCall(toolName, args, signal, onProgress) {
 // ── tool implementations ───────────────────────────────────
 
 /**
+ * Explain what a partial read left out, as one trailing line. A model that
+ * skims the head of a long result otherwise assumes it saw the whole file: the
+ * header already says "showing lines 1-500", but the last thing in the result
+ * is what it is sure to read.
+ * @param {number} readStart - index of the first returned line (0-based)
+ * @param {number} readEnd - index just past the last returned line
+ * @param {number} totalLines
+ * @returns {string} empty when the whole file was returned
+ */
+function describeUnreadRange(readStart, readEnd, totalLines) {
+  if (readStart <= 0 && readEnd >= totalLines) return "";
+  /** @type {string[]} */
+  const unread = [];
+  if (readStart > 0) unread.push(`1-${readStart}`);
+  if (readEnd < totalLines) unread.push(`${readEnd + 1}-${totalLines}`);
+  const ranges = unread.length === 2 ? `${unread[0]} and ${unread[1]}` : unread[0];
+  return (
+    `[End of returned range: lines ${readStart + 1}-${readEnd} of ${totalLines}. ` +
+    `Lines ${ranges} were NOT read and are NOT part of this result — ` +
+    `call read_file with offset to read them.]`
+  );
+}
+
+/**
  * Read a numbered range without truncating individual lines.
  * @param {string} root
  * @param {string} filePath
@@ -93,6 +117,13 @@ function readFile(root, filePath, offset, limit) {
     result += `, showing lines ${start + 1}-${end}`;
   }
   result += `)\n${numbered}`;
+  // A partial read says so at the END as well: the model reads the tail of a
+  // long result even when it skips the header, and a file listing it never saw
+  // must not be mistaken for the whole file.
+  if (slice.length > 0) {
+    const footer = describeUnreadRange(start, end, totalLines);
+    if (footer) result += "\n" + footer;
+  }
   // The line limit above is authoritative; don't cut requested lines or
   // individual long lines with the generic line/character limiter.
   return result;

@@ -62,9 +62,14 @@ function createFixture(t, lines = makeLines(2600)) {
   return { root, filePath, lines, vscodeStub, executeToolCall: loadExecutor(vscodeStub) };
 }
 
+/** Marker that starts the trailing "you did not see the rest" line. */
+const UNREAD_FOOTER = "[End of returned range:";
+
 /**
  * Assert every returned content line and its number, independently of the
- * header. Partial reads must advertise exactly the range actually returned.
+ * header. Partial reads must advertise exactly the range actually returned —
+ * in the header AND in a trailing line, so a model skimming the end of a long
+ * result cannot mistake it for the whole file.
  * @param {string} result - Actual executor output.
  * @param {{ filePath: string, lines: string[] }} fixture - Original file.
  * @param {number} first - Expected first line (1-based).
@@ -75,7 +80,10 @@ function assertReadRange(result, fixture, first, count) {
   const separator = result.indexOf("\n");
   assert.ok(separator >= 0, "file header must be separate from its content");
   const header = result.slice(0, separator);
-  const body = result.slice(separator + 1);
+  const rest = result.slice(separator + 1);
+  const footerAt = rest.startsWith(UNREAD_FOOTER) ? 0 : rest.indexOf("\n" + UNREAD_FOOTER);
+  const body = footerAt === -1 ? rest : rest.slice(0, footerAt);
+  const footer = footerAt === -1 ? "" : rest.slice(footerAt + (footerAt === 0 ? 0 : 1));
   assert.ok(header.startsWith(`File: ${fixture.filePath} (${fixture.lines.length} lines total`));
   const expected = fixture.lines.slice(first - 1, first - 1 + count)
     .map((line, index) => `${first + index}: ${line}`).join("\n");
@@ -88,6 +96,18 @@ function assertReadRange(result, fixture, first, count) {
     assert.ok(range, "partial reads must report their actual range");
     assert.equal(Number(range[1]), first);
     assert.equal(Number(range[2]), first + count - 1);
+  }
+  // A partial read says at the end which lines it left out; a complete one
+  // says nothing (there is nothing to warn about).
+  const isPartial = first > 1 || first + count - 1 < fixture.lines.length;
+  assert.equal(Boolean(footer), isPartial && count > 0, "the unread-range footer appears exactly on partial reads");
+  if (footer) {
+    assert.match(footer, new RegExp(`lines ${first}-${first + count - 1} of ${fixture.lines.length}`));
+    assert.match(footer, /were NOT read/);
+    const missing = first > 1 ? `1-${first - 1}` : "";
+    const trailing = first + count - 1 < fixture.lines.length ? `${first + count}-${fixture.lines.length}` : "";
+    const expectedRanges = [missing, trailing].filter(Boolean).join(" and ");
+    assert.ok(footer.includes(expectedRanges), `footer must name the unread lines (${expectedRanges})`);
   }
 }
 

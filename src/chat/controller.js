@@ -12,6 +12,16 @@ const { fetchMcpTools, callMcpTool } = require("../mcp/client");
 const { planCompaction } = require("../context/compact");
 const { formatTokenCount, estimateTextTokens, estimateMessageTokens } = require("../context/estimate");
 const { computeBudget, pruneRounds, truncateToolResult, countToolCalls } = require("../context/guard");
+const {
+  normalizeRounds,
+  alignBoundary,
+  trimRounds,
+  closeDanglingRounds,
+  shiftBoundary,
+  toDisplayTranscript,
+  hasTextContent,
+  ABORTED_TOOL_RESULT,
+} = require("../context/history");
 const { applyEdit, lastUserMessageIndex } = require("../conversation/edit");
 const { createApprovalGate } = require("./approvals");
 const { isAbortError } = require("./abort");
@@ -102,6 +112,11 @@ function createChatController(options) {
   /** @type {string | null} */
   let summary = null;
   let summaryTurns = 0;
+  // Transcript retention budget, in tokens — the last `computeBudget` value the
+  // chat computed for a request. Tool rounds are persisted now, so a session
+  // save is the point where storage grows: it trims old rounds to this budget.
+  // 0 means "no turn has run yet", where there is nothing to trim anyway.
+  let sessionBudget = 0;
   // Index into conversation of the first message NOT covered by the rolling
   // summary. Compaction is non-destructive: the transcript keeps every
   // message (the UI renders it all); only the model's view starts after this
@@ -156,6 +171,16 @@ function createChatController(options) {
   }
 
   /**
+   * Deliver the transcript to the webview. The UI renders user and assistant
+   * messages only; tool rounds stay on the host (the webview has no boxes to
+   * rebuild them into) but removal markers survive as notice lines.
+   * @returns {void}
+   */
+  function postHistory() {
+    post({ type: "historyRestored", messages: toDisplayTranscript(conversation) });
+  }
+
+  /**
    * Install (or replace) the message sink and replay the current state so a
    * freshly created webview shows the conversation.
    * @param {(msg: Record<string, any>) => void} nextSink
@@ -168,7 +193,7 @@ function createChatController(options) {
       post({ type: "sessionSwitched", sessionId: currentSession });
     }
     if (conversation.length > 0) {
-      post({ type: "historyRestored", messages: conversation });
+      postHistory();
     }
     if (hooks.getAgentCapacity) post({ type: "agentCapacityChanged", capacity: hooks.getAgentCapacity() });
     // A recreated webview (tab moved, sidebar re-resolved) must not offer Send
@@ -316,7 +341,7 @@ function createChatController(options) {
     postModels();
     if (conversation.length > 0) {
       post({ type: "sessionSwitched", sessionId });
-      post({ type: "historyRestored", messages: conversation });
+      postHistory();
     }
     postSessions();
     return true;
@@ -366,6 +391,41 @@ function createChatController(options) {
   }
 
   /**
+   * Enforce transcript retention before a save: tool rounds are capped by
+   * token budget only, oldest first, always keeping the newest round. A marker
+   * message records where the removed rounds used to be, and the summary
+   * boundary is shifted so it still points at the same message.
+   * @returns {void}
+   */
+  function applyRetention() {
+    // A batch a Stop cut short leaves calls without results; record them
+    // first, so the round about to be stored is pairable in both providers.
+    // This must run even when retention itself is off.
+    const filled = closeDanglingRounds(conversation);
+    if (filled > 0) {
+      log.appendLine("Chat " + chatId + ": recorded " + filled + " interrupted tool call result(s)");
+    }
+
+    // The budget comes from the turn that just ran: saves happen on Stop, tab
+    // close and shutdown too, and re-reading settings there would both cost a
+    // round trip and change behaviour for a chat that never sent anything.
+    if (!(sessionBudget > 0)) return;
+    const result = trimRounds(conversation, sessionBudget);
+    if (result.droppedRounds === 0) return;
+    summaryCoversUpTo = shiftBoundary(summaryCoversUpTo, result.removed, result.markerAtOld, result.markerAt);
+    log.appendLine(
+      "Chat " + chatId + ": trimmed " + result.droppedRounds + " tool round(s) from the transcript (~" +
+      formatTokenCount(result.freedTokens) + " tokens) to fit the " + formatTokenCount(sessionBudget) + "-token budget"
+    );
+    // Tell the user now, not only on the next history restore: the marker sits
+    // in the transcript, and the notice line shows where the rounds were.
+    const marker = conversation[result.markerAt];
+    if (marker && typeof marker.content === "string") {
+      post({ type: "compactionNotice", text: marker.content });
+    }
+  }
+
+  /**
    * Persist the conversation. Never saves empty sessions. Serialized through
    * Settings.mutateSessions so two chats saving at once cannot drop one
    * another's write.
@@ -376,6 +436,11 @@ function createChatController(options) {
     // an aborted turn could otherwise resurrect a session the user deleted.
     if (disposed) return;
     if (conversation.length === 0) return;
+
+    // Tool rounds are persisted, so the transcript is where storage grows:
+    // retention runs here, right before the write, so every save path inherits
+    // it (end of turn, compaction, Stop, tab close, shutdown).
+    applyRetention();
 
     const sessionId = ensureSession();
     const now = new Date().toISOString();
@@ -492,7 +557,7 @@ function createChatController(options) {
     loadIntoMemory(sessionId, session);
     postModels();
     post({ type: "sessionSwitched", sessionId });
-    post({ type: "historyRestored", messages: conversation });
+    postHistory();
     postSessions();
   }
 
@@ -671,7 +736,7 @@ function createChatController(options) {
         await saveSession();
         // The edit is already committed even if Stop arrived during saving.
         // Replay it before unwinding so the UI matches the persisted transcript.
-        post({ type: "historyRestored", messages: conversation });
+        postHistory();
         signal.throwIfAborted();
       } else {
         conversation.push({ role: "user", content: text, images: images || [], id: messageId });
@@ -748,10 +813,16 @@ function createChatController(options) {
       // threshold minus a proportional output/reasoning reserve (OpenCode's
       // formula), so a request is never sent when it would overflow.
       const budget = computeBudget(compaction.threshold);
+      // Stash it for the save path: retention trims the persisted transcript to
+      // the same budget without re-reading settings on every save.
+      sessionBudget = budget;
       if (compaction.mode !== "off") {
+        // The model's view starts at a round boundary: a summary index that
+        // landed inside a tool round would leave an unpaired result.
+        const viewStart = alignBoundary(conversation, summaryCoversUpTo);
         const plan = planCompaction({
           systemPrompt,
-          messages: conversation.slice(summaryCoversUpTo),
+          messages: conversation.slice(viewStart),
           threshold: compaction.threshold,
           keepTurns: compaction.keepTurns,
           summary,
@@ -863,8 +934,12 @@ function createChatController(options) {
       const oldUserTurns = plan.old.filter((m) => m.role === "user").length;
       summaryTurns += oldUserTurns;
       // Non-destructive: keep the full transcript (the UI renders it all);
-      // only the model's view advances past the folded turns.
-      summaryCoversUpTo = Math.min(summaryCoversUpTo + plan.old.length, conversation.length);
+      // only the model's view advances past the folded turns. The boundary is
+      // measured from the round-aligned view start the plan was built from,
+      // not from the raw index, or a boundary that had to snap back would
+      // double-count the messages between the two.
+      const viewStart = alignBoundary(conversation, summaryCoversUpTo);
+      summaryCoversUpTo = Math.min(viewStart + plan.old.length, conversation.length);
       await saveSession();
       // True token reduction: previous summary + folded turns − new summary.
       const tokensSaved =
@@ -891,6 +966,33 @@ function createChatController(options) {
       clearTimeout(timer);
       if (signal) signal.removeEventListener("abort", onAbort);
     }
+  }
+
+  /**
+   * Record a tool result in the transcript. Tool rounds are persisted (unlike
+   * before) so the next turn's model still has what its tools returned.
+   *
+   * The transcript stores exactly the string the request carried, never a
+   * reduced copy: the next turn must see what this turn's model saw. Its only
+   * bound is retention (`trimRounds`), which drops whole rounds by token budget
+   * and leaves a marker.
+   *
+   * Idempotent per call id: if the transcript already carries a placeholder
+   * for this call (a save that ran while the batch was still in flight), the
+   * real result replaces it instead of being appended as a second answer.
+   * @param {ConversationMessage[]} transcript
+   * @param {string} toolCallId
+   * @param {unknown} content - the request-facing result string
+   * @returns {void}
+   */
+  function recordToolResult(transcript, toolCallId, content) {
+    const text = content == null ? "" : String(content);
+    const existing = transcript.find((m) => m.role === "tool" && m.tool_call_id === toolCallId);
+    if (existing) {
+      existing.content = text;
+      return;
+    }
+    transcript.push({ role: "tool", tool_call_id: toolCallId, content: text });
   }
 
   /**
@@ -966,7 +1068,21 @@ function createChatController(options) {
 
     signal?.throwIfAborted();
     if (result.toolCalls && result.toolCalls.length > 0) {
-      messages.push({ role: "assistant", content: null, tool_calls: result.toolCalls });
+      // The round is recorded in BOTH arrays: `messages` is this turn's
+      // request (re-sent on the next round), `conversation` is the transcript
+      // (re-sent on the next turn). Persisting the transcript is what makes
+      // tool results survive a new user message. The text the model produced
+      // alongside its calls rides on the carrier, so the preamble the user saw
+      // streamed is not silently dropped from the history the model replays.
+      // The transcript gets its own copy: the guard prunes `messages` in place,
+      // and the two arrays must never share a mutable message.
+      const carrier = {
+        role: "assistant",
+        content: result.text && result.text.trim() ? result.text : null,
+        tool_calls: result.toolCalls,
+      };
+      messages.push(carrier);
+      conversation.push({ role: "assistant", content: carrier.content, tool_calls: result.toolCalls });
       for (const tc of result.toolCalls) {
         signal?.throwIfAborted();
         let toolResult, toolArgs;
@@ -1062,6 +1178,11 @@ function createChatController(options) {
                 args: JSON.stringify(toolArgs, null, 2),
                 result: "Aborted by user",
               });
+              // Record the interrupted call too: the round is persisted, and
+              // the next turn's model must not think the tool silently
+              // returned nothing. Calls the batch never reached are filled in
+              // by `closeDanglingRounds` before the transcript is saved.
+              recordToolResult(conversation, tc.id, ABORTED_TOOL_RESULT);
               throw e;
             }
             toolResult = "Error: " + (e instanceof Error ? e.message : String(e));
@@ -1084,6 +1205,10 @@ function createChatController(options) {
         // silently discard requested lines (or cut a long line in half).
         const content = tc.function.name === "read_file" ? String(toolResult) : truncateToolResult(toolResult);
         messages.push({ role: "tool", tool_call_id: tc.id, content });
+        // The transcript stores the SAME string, not a reduced copy: the next
+        // turn's model must see exactly what this turn's model saw. Retention
+        // (`trimRounds`) is the only bound, and it drops whole rounds.
+        recordToolResult(conversation, tc.id, content);
       }
       await chatLoop(messageId, messages, modelConfig, apiKey, provider, tools, budget);
       return;
@@ -1166,6 +1291,11 @@ function createChatController(options) {
   /**
    * Convert the in-memory conversation plus system prompt into
    * OpenAI-style chat messages (including image content parts).
+   *
+   * Tool rounds are persisted with the transcript, so they ride along here:
+   * `tool_calls`/`tool_call_id` are carried through, and the result is
+   * normalized so every call has exactly one answer (a turn stopped mid-batch
+   * still yields a valid request — both providers reject unpaired halves).
    * @param {string} systemPrompt
    * @returns {Array<import("../providers/openai").ChatMessage>}
    */
@@ -1185,8 +1315,27 @@ function createChatController(options) {
         content: "Summary of earlier messages (older turns were compacted to save context — the model sees this summary of the older part; the full transcript remains visible in the chat):\n" + summary,
       });
     }
-    for (let i = summaryCoversUpTo; i < conversation.length; i++) {
+    // Snap the boundary to a round edge: starting the view inside a tool round
+    // would send a `tool` result whose call was summarized away.
+    const boundary = alignBoundary(conversation, summaryCoversUpTo);
+    for (let i = boundary; i < conversation.length; i++) {
       const m = conversation[i];
+      if (m.role === "tool") {
+        messages.push({ role: "tool", tool_call_id: m.tool_call_id, content: typeof m.content === "string" ? m.content : "" });
+        continue;
+      }
+      if (m.tool_calls && m.tool_calls.length > 0) {
+        // An assistant message that called tools: keep the calls, and the text
+        // it produced alongside them (the same text the user saw streamed).
+        /** @type {import("../providers/openai").ChatMessage} */
+        const carrier = {
+          role: "assistant",
+          content: typeof m.content === "string" && m.content.trim() ? m.content : null,
+          tool_calls: m.tool_calls,
+        };
+        messages.push(carrier);
+        continue;
+      }
       if (m.images && m.images.length > 0) {
         /** @type {Array<import("../providers/openai").ContentPart>} */
         const content = [
@@ -1198,7 +1347,7 @@ function createChatController(options) {
         messages.push({ role: m.role, content: m.content });
       }
     }
-    return messages;
+    return /** @type {Array<import("../providers/openai").ChatMessage>} */ (normalizeRounds(messages));
   }
 
   function handleCancel() {
@@ -1257,7 +1406,7 @@ function createChatController(options) {
         if (currentSession) {
           post({ type: "sessionSwitched", sessionId: currentSession });
         }
-        post({ type: "historyRestored", messages: conversation });
+        post({ type: "historyRestored", messages: toDisplayTranscript(conversation) });
         if (hooks.getAgentCapacity) post({ type: "agentCapacityChanged", capacity: hooks.getAgentCapacity() });
         postBusy(abortController !== null);
         break;
@@ -1365,7 +1514,12 @@ function createChatController(options) {
     getModelId: () => activeModel,
     getReasoningEffort: () => reasoningEffort,
     getLastAssistantResponse: () => {
-      const lastAssistant = [...conversation].reverse().find((message) => message.role === "assistant");
+      // Tool rounds are persisted, so an assistant message with only
+      // `tool_calls` (no text) can now be the newest one. A parent model must
+      // get the last *answer*, never an empty string from a call carrier.
+      const lastAssistant = [...conversation]
+        .reverse()
+        .find((message) => message.role === "assistant" && hasTextContent(message));
       return lastAssistant && typeof lastAssistant.content === "string" ? lastAssistant.content : "";
     },
     isBusy: () => abortController !== null,

@@ -1427,6 +1427,13 @@
               addMsg('user', msg.content, msg.id, false, msg.images);
             } else if (msg.role === 'assistant') {
               addMsg('assistant', msg.content);
+            } else if (msg.notice) {
+              // A marker in place of tool rounds the host dropped to stay
+              // within the context budget — the transcript no longer has them.
+              var histNotice = document.createElement('div');
+              histNotice.className = "compaction-notice";
+              histNotice.textContent = msg.content;
+              messagesEl.appendChild(histNotice);
             }
           });
           messagesEl.scrollTop = messagesEl.scrollHeight;

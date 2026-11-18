@@ -25,6 +25,8 @@
  * @property {Array<{ id: string, name: string, dataUrl: string, size: number, warning: boolean }>} [images]
  * @property {Array<{ id: string, type?: string, function: { name: string, arguments: string } }>} [tool_calls] - tool-call payload on assistant messages
  * @property {string} [tool_call_id] - which tool call a tool result answers
+ * @property {boolean} [notice] - transcript furniture (a retention marker), rendered as a notice line rather than a message
+ * @property {number} [removedRounds] - how many tool rounds a notice marker stands in for
  */
 
 /**

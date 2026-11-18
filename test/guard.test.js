@@ -101,12 +101,15 @@ test("pruneRounds drops oldest whole rounds to fit the budget", () => {
   assert.equal(result.droppedRounds, 2);
   assert.ok(result.freedTokens >= 20000);
   assert.ok(result.estimate <= 40000);
-  // The newest round survives intact, and its tool result still matches.
-  assert.equal(messages.length, 3);
-  assert.equal(messages[1].role, "assistant");
-  assert.equal(messages[1].tool_calls[0].function.name, "run");
-  assert.equal(messages[2].role, "tool");
-  assert.equal(messages[2].tool_call_id, "call_run");
+  // The removed rounds are replaced by one marker, and the newest round
+  // survives intact with its tool result still matching.
+  assert.equal(messages.length, 4);
+  assert.equal(messages[0].role, "user");
+  assert.match(messages[1].content, /2 older tool rounds removed/);
+  assert.equal(messages[2].role, "assistant");
+  assert.equal(messages[2].tool_calls[0].function.name, "run");
+  assert.equal(messages[3].role, "tool");
+  assert.equal(messages[3].tool_call_id, "call_run");
 });
 
 test("pruneRounds does not prune when the freed tokens are marginal (< 20K)", () => {
@@ -151,8 +154,31 @@ test("pruneRounds respects the cushion: keeps ~40K of recent rounds", () => {
   assert.equal(result.overBudget, false);
   assert.equal(result.droppedRounds, 3);
   assert.ok(result.estimate <= 50000);
-  assert.equal(messages.length, 1 + 3 * 2); // user + 3 rounds
-  assert.equal(messages[1].tool_calls[0].function.name, "t3");
+  assert.equal(messages.length, 1 + 1 + 3 * 2); // user + marker + 3 rounds
+  assert.match(messages[1].content, /3 older tool rounds removed/);
+  assert.equal(messages[2].tool_calls[0].function.name, "t3");
+});
+
+test("pruneRounds prunes rounds from older turns too, not just the current one", () => {
+  // Persisted rounds sit inside earlier turns. The guard must treat them as
+  // candidates: otherwise a long session could never fit its request.
+  const messages = [
+    { role: "user", content: "first turn" },
+    { role: "assistant", content: "answer one" },
+    ...roundMsg("old", 1000, 120000),
+    { role: "user", content: "second turn" },
+    ...roundMsg("newer", 1000, 120000),
+  ];
+  const result = pruneRounds(messages, 40000);
+  assert.equal(result.overBudget, false);
+  assert.equal(result.droppedRounds, 1);
+  assert.ok(result.estimate <= 40000);
+  // The older turn's round is gone, the current turn's round survives.
+  const names = messages
+    .filter((m) => m.role === "assistant" && m.tool_calls)
+    .map((m) => m.tool_calls[0].function.name);
+  assert.deepEqual(names, ["newer"]);
+  assert.ok(messages.some((m) => m.role === "user" && m.content === "first turn"));
 });
 
 // ── truncateToolResult ──────────────────────────────────────

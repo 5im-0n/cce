@@ -25,7 +25,15 @@ const SUMMARY_SYSTEM_PROMPT =
   "You are a conversation summarizer for a coding assistant. " +
   "Produce a concise but information-dense summary of the conversation: key facts, " +
   "decisions, code discussed (with file paths), open questions, and any constraints. " +
-  "Keep it under ~500 words. Preserve specifics the user will need later; drop pleasantries.";
+  "Keep it under ~500 words. Preserve specifics the user will need later; drop pleasantries. " +
+  "Tool calls appear as `Tool <name>(<args>) → <result>`; keep the conclusions drawn from " +
+  "them (files read, search hits, command output) even though the raw output is dropped.";
+
+/** Tool results folded into the summary are cut to this many chars. */
+const SUMMARY_TOOL_RESULT_MAX_CHARS = 800;
+
+/** Tool arguments folded into the summary are cut to this many chars. */
+const SUMMARY_TOOL_ARGS_MAX_CHARS = 200;
 
 /**
  * Split the conversation at the last `keepTurns` user messages.
@@ -50,6 +58,34 @@ function splitAtKeepTurn(messages, keepTurns) {
 }
 
 /**
+ * Render one transcript message for the summarization request. Tool rounds are
+ * rendered as `Tool <name>(<args>) → <result head>` lines so the summary keeps
+ * what the tools actually returned instead of a bare `Assistant: null`.
+ * @param {ConversationMessage} message
+ * @returns {string}
+ */
+function renderForSummary(message) {
+  if (message.role === "tool") {
+    const head = typeof message.content === "string" ? message.content : "";
+    return "Tool result: " + head.slice(0, SUMMARY_TOOL_RESULT_MAX_CHARS);
+  }
+  if (message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    const calls = message.tool_calls
+      .map((tc) => {
+        const name = tc && tc.function && tc.function.name ? tc.function.name : "unknown";
+        const args = tc && tc.function && typeof tc.function.arguments === "string" ? tc.function.arguments : "{}";
+        return name + "(" + args.slice(0, SUMMARY_TOOL_ARGS_MAX_CHARS) + ")";
+      })
+      .join(", ");
+    const text = typeof message.content === "string" ? message.content.trim() : "";
+    return "Assistant" + (text ? ": " + text + "\n" : " ") + "called tools: " + calls;
+  }
+  const label = message.role === "user" ? "User" : message.role === "system" ? "Note" : "Assistant";
+  const content = typeof message.content === "string" ? message.content : "";
+  return label + ": " + content;
+}
+
+/**
  * Build the chat request for the summarization call. Uses a single user
  * message (never alternating roles) so it works with both the OpenAI and
  * Anthropic providers, and omits images — they cannot be summarized.
@@ -64,9 +100,7 @@ function buildSummaryRequest(summary, oldTurns) {
   }
   body += "New conversation turns to fold into the summary:\n\n";
   for (const t of oldTurns) {
-    const label = t.role === "user" ? "User" : "Assistant";
-    const content = typeof t.content === "string" ? t.content : "";
-    body += label + ": " + content;
+    body += renderForSummary(t);
     if (t.images && t.images.length > 0) {
       body += " [image attachment omitted — cannot be summarized]";
     }
